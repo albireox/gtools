@@ -54,7 +54,11 @@ def list_exposures(directory: str | pathlib.Path):
                 header.get("FLAVOR", "?"),
                 header.get("EXPTIME", "?"),
                 header.get("HARTMANN", "?"),
+                header.get("COLLA", "?"),
             )
         )
 
-    return Table(rows=data, names=["File", "Flavour", "ExpTime", "Hartmann"])
+    return Table(
+        rows=data,
+        names=["File", "Flavour", "ExpTime", "Hartmann", "Collimator"],
+    )
