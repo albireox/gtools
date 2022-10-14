@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import numpy
+from astropy.io import fits
+from astropy.table import Table
 
 
-__all__ = ["nslice"]
+__all__ = ["nslice", "list_exposures"]
 
 
 def nslice(
@@ -32,3 +36,25 @@ def nslice(
         raise ValueError("Invalid inputs in nslice.")
 
     return numpy.s_[i0:i1, j0:j1]
+
+
+def list_exposures(directory: str | pathlib.Path):
+    """Returns a table with all the exposures in a directory."""
+
+    directory = pathlib.Path(directory)
+
+    files = sorted(directory.glob("*.fit*"))
+
+    data = []
+    for file in list(files):
+        header = fits.getheader(str(file))
+        data.append(
+            (
+                str(file.name),
+                header.get("FLAVOR", "?"),
+                header.get("EXPTIME", "?"),
+                header.get("HARTMANN", "?"),
+            )
+        )
+
+    return Table(rows=data, names=["File", "Flavour", "ExpTime", "Hartmann"])

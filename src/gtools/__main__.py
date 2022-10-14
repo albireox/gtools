@@ -16,5 +16,15 @@ def gtools():
     pass
 
 
+@gtools.command(name="boss-exposures")
+@click.argument("PATH", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+def boss_exposures(path: str):
+    """Lists BOSS exposures."""
+
+    from gtools.boss.tools import list_exposures
+
+    list_exposures(str(path)).pprint_all()
+
+
 if __name__ == "__main__":
     gtools()
