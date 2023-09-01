@@ -12,7 +12,7 @@ import pathlib
 
 import numpy
 from astropy.io import fits
-from astropy.stats.sigma_clipping import SigmaClip
+from astropy.stats import sigma_clip
 
 from .parameters import DATA_REGION, GAIN, OVERSCAN_LINES, OVERSCAN_PIXELS
 from .tools import nslice
@@ -42,8 +42,6 @@ def quick_bias(filename: str | pathlib.Path, apply_gain: bool = True):
 
     olines = OVERSCAN_LINES["r" if red else "b"]
     opixels = OVERSCAN_PIXELS["r" if red else "b"]
-
-    sigma_clip = SigmaClip(sigma=3)
 
     # Iterate over quadrants starting from lower-left CCW.
     for ii, jj in [[0, 0], [0, 1], [1, 1], [1, 0]]:
