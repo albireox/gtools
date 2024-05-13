@@ -133,6 +133,7 @@ def create_sdss_id_to_catalog_view(
 
     log.info("Creating indices ..")
 
+    database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (pk);")
     database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (sdss_id);")
     database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (catalogid);")
     database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (version_id);")
