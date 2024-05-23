@@ -91,7 +91,7 @@ def create_sdss_id_to_catalog_view(
             continue
 
         pk = pks[0]
-        alias = f"{table}_{pk}"
+        alias = f"{table}__{pk}"
         select_columns_list.append(f"catalogdb.{table}.{pk} AS {alias}")
         aliases.append(alias)
 
