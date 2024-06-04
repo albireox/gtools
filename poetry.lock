@@ -678,6 +678,40 @@ files = [
 numpy = ">=1.17.3"
 
 [[package]]
+name = "healpy"
+version = "1.17.1"
+description = "Healpix tools package for Python"
+optional = false
+python-versions = ">=3.9"
+files = [
+    {file = "healpy-1.17.1-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:19a5eea85f348896eb58e572ce25845cc0dc40661508b6b4b6e8fb4f34d50d74"},
+    {file = "healpy-1.17.1-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:e06abb17b17e2ce586de37b0327dccd334d60802a4e20d7b67f349e248e6fd0f"},
+    {file = "healpy-1.17.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:574c714c17a23ae21668df4587b63f25d977436be685df51a1d11be217079ee9"},
+    {file = "healpy-1.17.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:610fe0255a5dd72108ad9778f0ca90422ebfa34ace098cace93b470186c9f6cc"},
+    {file = "healpy-1.17.1-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:63fbd4dbdac0d869aacb65d952ce0415c20393107fbe3ded18f682ba6b5e4a51"},
+    {file = "healpy-1.17.1-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:50b17c796fa90679d9618d6cbeb048ad4c82f226d97b0575f6f62c2ef7f8a788"},
+    {file = "healpy-1.17.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:80dee19bec6029df43ab606c4caefae945f787edc8a9e551a3189d437c0b52ba"},
+    {file = "healpy-1.17.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b05ba7ae36708371cce9b01934d86d22d17b0a81898b7b7c83e6f99b64933b62"},
+    {file = "healpy-1.17.1-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:8a9db38eca26764b671156529edd6a19f9b5d5c9ed3f2bf190c8b1b93575a4ef"},
+    {file = "healpy-1.17.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:c66f35a77def27cfc444f1f9a36521c0a954a88eba7d11bec8c10616e0bb4a5b"},
+    {file = "healpy-1.17.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:378e36660d3df4ef5c85c1b0d782d5993c86daefafe0a1e4594e7f7a71792583"},
+    {file = "healpy-1.17.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2f5ea378e683f877f70870744abfbeb900d20e43ba024074763e3999d4db5402"},
+    {file = "healpy-1.17.1-cp39-cp39-macosx_11_0_x86_64.whl", hash = "sha256:26fc9a22939c04b09bdda3a9e72fb6969dd8e446b420ea7947b7e146d4c6c075"},
+    {file = "healpy-1.17.1-cp39-cp39-macosx_14_0_arm64.whl", hash = "sha256:36e4699ed00aaec7dad9d22d8de635900e4a7b1bb4e6ce2dc9c0cb3ef47e6ec1"},
+    {file = "healpy-1.17.1-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f521714cf325bc2886c95a7cd9e6a81d4e4583c6d478b0ffbe8d08d4da7d7954"},
+    {file = "healpy-1.17.1-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9f18548572b6a702e57071b70cc9818fe7ed74edaccbab5987ff55c6e9fd9b3a"},
+    {file = "healpy-1.17.1.tar.gz", hash = "sha256:6469fc9669e4cc6068c1509ba67228f215db57b3c2d6f00bd1eb481d97732e88"},
+]
+
+[package.dependencies]
+astropy = "*"
+numpy = ">=1.19"
+
+[package.extras]
+all = ["matplotlib", "scipy"]
+test = ["matplotlib", "pytest", "pytest-astropy-header", "pytest-cython", "pytest-doctestplus", "requests", "scipy"]
+
+[[package]]
 name = "invoke"
 version = "2.2.0"
 description = "Pythonic task execution"
@@ -2081,4 +2115,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10,<4"
-content-hash = "177b2c43192d3b9c223f3946ec7b61a931350fcbd9e0d1e3a5cf88fc96b79005"
+content-hash = "be84f44a46e319f1d0e0b1a7fa4ab415844e0b1506d5efd12693844c3bfde229"
