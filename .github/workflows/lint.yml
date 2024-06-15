@@ -1,0 +1,35 @@
+name: Lint
+
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade wheel pip setuptools
+          pip install .
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff src/gtools
+          ruff format --check src/gtools
