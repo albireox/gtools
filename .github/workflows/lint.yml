@@ -23,11 +23,6 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade wheel pip setuptools
-          pip install .
-
       - name: Lint with ruff
         run: |
           pip install ruff
