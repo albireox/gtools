@@ -12,6 +12,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import random
 from functools import partial
 
 import healpy
@@ -34,6 +35,8 @@ def sframe_to_parquet(
     file = pathlib.Path(file)
 
     hdul = fits.open(file)
+
+    header = hdul[0].header
 
     flux = hdul["FLUX"].data.astype("float32")
 
@@ -83,11 +86,21 @@ def sframe_to_parquet(
 
     df = df.with_columns(targettype=polars.col.targettype.str.to_lowercase())
 
+    df = df.with_columns(
+        tile_id=polars.lit(header["TILE_ID"], dtype=polars.Int32),
+        sframe_filename=polars.lit(file.name, dtype=polars.String),
+    )
+
     if outfile is None:
         return df
 
     outfile = pathlib.Path(outfile)
-    df.write_parquet(outfile)
+    df.write_parquet(
+        outfile,
+        use_pyarrow=True,
+        # compression="lz4",
+        pyarrow_options={"partition_cols": ["tile_id"]},
+    )
 
     if write_headers:
         headers = headers_to_dict(hdul)
@@ -127,8 +140,8 @@ def headers_to_dict(file: os.PathLike | pathlib.Path | fits.HDUList):
 def _batch_convert_helper(outdir: pathlib.Path, file: pathlib.Path):
     """Helper for `.batch_convert`."""
 
-    outfile = outdir / file.with_suffix(".parquet").name
-    sframe_to_parquet(file, outfile=outfile, write_headers=True)
+    # outfile = outdir / file.with_suffix(".parquet").name
+    sframe_to_parquet(file, outfile=outdir)
 
 
 def batch_convert(
@@ -142,12 +155,15 @@ def batch_convert(
 
     outpath.mkdir(exist_ok=True, parents=True)
 
-    files = inpath.glob("*.fits")
+    files = list(inpath.glob("**/lvmSFrame*.fits"))
+    random.shuffle(files)
 
     batch_convert_helper_partial = partial(_batch_convert_helper, outpath)
 
     bar = Progress()
     task_id = bar.add_task("Converting", total=len(list(files)))
-    with multiprocessing.Pool(16) as pool:
+    bar.start()
+
+    with multiprocessing.Pool(32) as pool:
         for __ in pool.imap_unordered(batch_convert_helper_partial, files):
             bar.update(task_id=task_id, advance=1)
