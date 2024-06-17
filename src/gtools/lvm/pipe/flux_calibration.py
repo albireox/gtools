@@ -47,7 +47,6 @@ log = get_logger("gtools.lvm.pipe.flux_calibration", use_rich_handler=True)
 def lvm_fluxcal_self(
     hobject: PathType,
     connection: peewee.PostgresqlDatabase | None = None,
-    targettype: str = "science",
     silent: bool = False,
     plot: bool = False,
     plot_dir: PathType | None = None,
