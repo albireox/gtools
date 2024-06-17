@@ -3,7 +3,7 @@
 #
 # @Author: José Sánchez-Gallego (gallegoj@uw.edu)
 # @Date: 2024-06-15
-# @Filename: self_calibration.py
+# @Filename: flux_calibration.py
 # @License: BSD 3-clause (http://www.opensource.org/licenses/BSD-3-Clause)
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ ARRAY_2D_F32 = nptyping.NDArray[nptyping.Shape["*,*"], nptyping.Float32]
 PathType = os.PathLike | str | pathlib.Path
 
 
-log = get_logger("gtools.lvm.pipe.self_calibration", use_rich_handler=True)
+log = get_logger("gtools.lvm.pipe.flux_calibration", use_rich_handler=True)
 
 
 def lvm_fluxcal_self(
