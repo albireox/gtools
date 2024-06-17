@@ -111,6 +111,8 @@ def lvm_fluxcal_self(
     bore_dec = hdul[0].header["POSCIDE"]
     secz = calculate_secz(bore_ra, bore_dec, hdul[0].header["OBSTIME"])
 
+    exp_time = hdul[0].header["EXPTIME"]
+
     log.info(f"Retrieving Gaia sources around ({bore_ra:.3f}, {bore_dec:.3f}) deg.")
 
     if connection is None:
@@ -235,7 +237,9 @@ def lvm_fluxcal_self(
 
     # Calculate the sensitivity function.
     log.info("Calculating sensitivity function for each source.")
-    sens = map(lambda row: _calc_sensitivity_udf(row, wave, ext, secz), df.to_dicts())
+    sens = map(
+        lambda row: _calc_sensitivity_udf(row, wave, ext, secz, exp_time), df.to_dicts()
+    )
 
     array_type = polars.Array(polars.Float32, wave.size)
     sens_df = polars.DataFrame(sens).cast(array_type)
@@ -322,13 +326,15 @@ def _plot_sensitivity_function(
                 flux_corrected = numpy.array(row["flux_corrected"], dtype=numpy.float32)
                 flux_xp = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
 
-                flux_corrected /= numpy.nanmedian(flux_corrected)
-                flux_xp /= numpy.max(flux_xp)
+                sens_smooth = row["sens_smooth"]
+
+                flux_corrected /= numpy.nanmedian(flux_corrected[500:-500])
+                flux_xp /= numpy.nanmedian(flux_xp)
 
                 fig, ax = plt.subplots()
                 ax2 = ax.twinx()
 
-                ax2.plot(wave, row["sens_smooth"], "k-", zorder=10, label="Sensitivity")
+                ax2.plot(wave, sens_smooth, "k-", zorder=10, label="Sensitivity")
 
                 ax.plot(
                     wave,
@@ -356,15 +362,16 @@ def _plot_sensitivity_function(
                     transform=ax2.transAxes,
                 )
 
+                # Labels and legeneds
                 ax.set_xlabel("Wavelength [A]")
 
                 ax.set_ylabel("Normalised flux")
                 ax2.set_ylabel("Sensitivity response (XP / corrected flux)")
 
+                ax.set_ylim(0, 2)
+
                 ax.legend(loc="upper left")
                 ax2.legend(loc="upper right")
-
-                ax.set_ylim(0, 2)
 
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -384,17 +391,14 @@ def _interp_gaia_xp_udf(
 
 
 def _calc_sensitivity_udf(
-    row: dict,
-    wave: numpy.ndarray,
-    ext: numpy.ndarray,
-    secz: float,
+    row: dict, wave: numpy.ndarray, ext: numpy.ndarray, secz: float, exp_time: float
 ) -> dict:
     """Calculates the sensitivity function for a given source."""
 
     flux = numpy.array(row["flux"], dtype=numpy.float32)
     sky_corr = numpy.array(row["sky_corr"], dtype=numpy.float32)
 
-    flux_corrected = ((flux - sky_corr) / 900.0) * 10 ** (0.4 * ext * secz)
+    flux_corrected = ((flux - sky_corr) / exp_time) * 10 ** (0.4 * ext * secz)
     flux_corrected = flux_corrected.tolist()
 
     if row["flux_xp_resampled"] is None:

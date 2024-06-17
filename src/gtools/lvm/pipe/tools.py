@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import pathlib
 
+from typing import Sequence
+
 import nptyping as npt
 import numpy
 import pandas
@@ -77,6 +79,7 @@ def get_gaiaxp(
     data
         A Polars data frame with the results of the query. Returns ``None``
         if there is not an XP spectrum associated with the source ID.
+        XP fluxes are converted to erg/s/cm^2/A.
 
     """
 
@@ -107,6 +110,13 @@ def get_gaiaxp(
         polars.col(["flux_xp", "flux_error_xp"])
         .str.strip_chars("[]")
         .str.split(",")
+        .cast(polars.Array(polars.Float32, len(XP_WAVE_SAMPLE)))
+    )
+
+    # Convert to erg/s/cm^2/A.
+    df = df.with_columns(
+        polars.col("flux_xp", "flux_error_xp")
+        .map_elements(_W_to_erg, return_dtype=polars.List(polars.Float64))
         .cast(polars.Array(polars.Float32, len(XP_WAVE_SAMPLE)))
     )
 
@@ -161,6 +171,7 @@ def get_gaiaxp_cone(
     -------
     data
         A Polars data frame with the results of the query.
+        XP fluxes are converted to erg/s/cm^2/A.
 
     """
 
@@ -197,6 +208,13 @@ def get_gaiaxp_cone(
         .cast(polars.Array(polars.Float32, len(XP_WAVE_SAMPLE)))
     )
 
+    # Convert to erg/s/cm^2/A.
+    df = df.with_columns(
+        polars.col("flux_xp", "flux_error_xp")
+        .map_elements(_W_to_erg, return_dtype=polars.List(polars.Float64))
+        .cast(polars.Array(polars.Float32, len(XP_WAVE_SAMPLE)))
+    )
+
     # Add the wavelength column.
     df = df.with_columns(
         wave_xp=polars.lit(
@@ -206,6 +224,20 @@ def get_gaiaxp_cone(
     )
 
     return df
+
+
+def _W_to_erg(
+    data: float | Sequence[float],
+) -> float | Sequence[float]:
+    """Converts W/s/micron to erg/s/cm^2/A."""
+
+    factor = 1e7 * 1e-1 * 1e-4
+
+    if isinstance(data, (int, float)):
+        return factor * data
+
+    flux = factor * numpy.array(data, dtype=numpy.float32)
+    return flux.tolist()
 
 
 def slitmap_to_polars(
