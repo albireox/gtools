@@ -13,13 +13,15 @@ import textwrap
 from typing import TYPE_CHECKING
 
 from sdssdb.peewee.sdss5db import database
+from sdsstools import get_logger
 from sdsstools.utils import Timer
-
-from gtools import log
 
 
 if TYPE_CHECKING:
     pass
+
+
+log = get_logger("gtools.datavix.views", use_rich_handler=True)
 
 
 def create_sdss_id_to_catalog_view(

@@ -6,11 +6,9 @@
 # @Filename: __init__.py
 # @License: BSD 3-clause (http://www.opensource.org/licenses/BSD-3-Clause)
 
-from sdsstools import get_logger, get_package_version
+from sdsstools import get_package_version
 
 
 NAME = "gtools"
-
-log = get_logger(NAME, use_rich_handler=True)
 
 __version__ = get_package_version(path=__file__, package_name=NAME)
