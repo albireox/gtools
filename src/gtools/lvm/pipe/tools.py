@@ -226,9 +226,7 @@ def get_gaiaxp_cone(
     return df
 
 
-def _W_to_erg(
-    data: float | Sequence[float],
-) -> float | Sequence[float]:
+def _W_to_erg(data: float | Sequence[float]) -> float | Sequence[float]:
     """Converts W/s/micron to erg/s/cm^2/A."""
 
     factor = 1e7 * 1e-1 * 1e-4
