@@ -179,7 +179,7 @@ def get_gaiaxp_cone(
         query = f"""
             SELECT xp.source_id, xp.ra, xp.dec, 0 AS wave_xp, xp.flux AS flux_xp,
                 xp.flux_error AS flux_error_xp, g3.phot_rp_mean_mag,
-                g3.phot_bp_mean_mag, g3.phot_g_mean_mag
+                g3.phot_bp_mean_mag, g3.phot_g_mean_mag, g3.teff_gspphot
             FROM {gaia_dr3_xp_table} AS xp
             JOIN {gaia_dr3_source_table} AS g3 ON xp.source_id = g3.source_id
             WHERE q3c_radial_query(xp.ra, xp.dec, {ra}, {dec}, {radius})

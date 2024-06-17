@@ -18,6 +18,7 @@ import polars
 import seaborn
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
+from astropy.stats import biweight_location, biweight_scale
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import interpolate
@@ -46,6 +47,7 @@ log = get_logger("gtools.lvm.pipe.self_calibration", use_rich_handler=True)
 def lvm_fluxcal_self(
     hobject: PathType,
     connection: peewee.PostgresqlDatabase | None = None,
+    targettype: str = "science",
     silent: bool = False,
     plot: bool = False,
     plot_dir: PathType | None = None,
@@ -98,6 +100,8 @@ def lvm_fluxcal_self(
     else:
         plot_dir = pathlib.Path(plot_dir).absolute()
 
+    plot_stem = str(plot_dir / f"{hobject.stem}")
+
     log.info(f"Processing file {hobject!s}")
 
     hdul = fits.open(hobject)
@@ -131,7 +135,7 @@ def lvm_fluxcal_self(
 
     log.debug(
         "Rejecting stars with with separation to "
-        f"fibre centre > {max_sep:.1f} arcsec."
+        f"fibre centre < {max_sep:.1f} arcsec."
     )
 
     # Get neighrest fibre in the slitmap for each Gaia star.
@@ -177,7 +181,7 @@ def lvm_fluxcal_self(
 
     if plot:
         # Plot the IFU map with the Gaia sources, colouring by validity.
-        _plot_ifu_map(data, slitmap, gaia_sources, str(plot_dir / hobject.stem))
+        _plot_ifu_map(data, slitmap, gaia_sources, plot_stem)
 
     # Create a dataframe of fibre fluxes.
     df = slitmap_sci.clone()
@@ -236,16 +240,25 @@ def lvm_fluxcal_self(
     )
 
     ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
-    sens_df = polars.DataFrame(sens).cast(ARRAY_TYPE)
+    sens_df = polars.DataFrame(
+        sens,
+        schema={
+            "flux_corrected": ARRAY_TYPE,
+            "sens": ARRAY_TYPE,
+            "sens_smooth": ARRAY_TYPE,
+        },
+    )
 
     df = df.with_columns(sens_df)
 
     if plot:
-        # Plot the sensitivity function for each Gaia source.
-        stem = str(plot_dir / f"{hobject.stem}")
-        plot_file_path = f"{stem}_sensitivity.pdf"
+        log.info("Plotting sensitivity functions.")
 
-        _plot_sensitivity_function(df, wave, plot_file_path)
+        # Plot the sensitivity function for each Gaia source.
+        _plot_sensitivity_functions(df, wave, f"{plot_stem}_sensitivity.pdf")
+
+        # Plot mean sensitivity function and residuals.
+        _plot_sensitivity_mean(df, wave, f"{plot_stem}_sensitivity_mean.pdf")
 
     return df
 
@@ -301,7 +314,7 @@ def _plot_ifu_map(
     plt.close("all")
 
 
-def _plot_sensitivity_function(
+def _plot_sensitivity_functions(
     df: polars.DataFrame,
     wave: numpy.ndarray,
     file_path: PathType,
@@ -373,6 +386,85 @@ def _plot_sensitivity_function(
                 pdf.savefig(fig)
                 plt.close(fig)
 
+    seaborn.reset_defaults()
+
+
+def _plot_sensitivity_mean(
+    df: polars.DataFrame,
+    wave: numpy.ndarray,
+    plot_file_path: str,
+):
+    """Plot the mean sensitivity function and residuals."""
+
+    stds = df.filter(polars.col.sens.is_not_null())
+    sens_mean, sens_rms = get_mean_sensitivity_response(df, use_smooth=True)
+
+    seaborn.set_theme(context="paper", style="ticks", font_scale=0.8)
+
+    with plt.ioff():
+        fig, axes = plt.subplots(2, height_ratios=[4, 1], sharex=True)
+        fig.subplots_adjust(hspace=0)
+
+        ax = axes[0]
+
+        for row in stds.iter_rows(named=True):
+            ax.plot(wave, row["sens_smooth"], "0.8", lw=0.9, alpha=0.8)
+
+        ax.plot(wave, sens_mean, "r-", linewidth=2, label="Mean sensitivity")
+
+        ax.legend(loc="upper right")
+
+        # Residuals
+        ax_res = axes[1]
+
+        # Get the current limits for the reference lines.
+        xlim0, xlim1 = ax_res.get_xlim()
+
+        ax_res.fill_between(
+            wave,
+            sens_rms / sens_mean,
+            -sens_rms / sens_mean,
+            color="b",
+            lw=0,
+            alpha=0.5,
+        )
+
+        ax_res.hlines(
+            [0.05, -0.05],
+            xlim0,
+            xlim1,
+            color="k",
+            linestyle="dotted",
+            lw=0.5,
+        )
+        ax_res.hlines(
+            [0.1, -0.1],
+            xlim0,
+            xlim1,
+            color="k",
+            linestyle="dashed",
+            lw=0.5,
+        )
+
+        # Labels and aesthetics
+        ax.set_ylabel("Sensitivity response")
+
+        ax_res.set_xlabel("Wavelength [A]")
+        ax_res.set_ylabel("Rel. residuals")
+
+        # Remove the first y-tick label to avoid overlap with the second axis.
+        y_ticks = ax.yaxis.get_major_ticks()
+        y_ticks[0].label1.set_visible(False)
+
+        # Force xlims which may have changed.
+        ax_res.set_xlim(xlim0, xlim1)
+
+        ax.set_ylim(1e-14, 1e-13)
+
+        fig.savefig(plot_file_path)
+
+    seaborn.reset_defaults()
+
 
 def _resample_gaia_xp(df: polars.DataFrame, wave: numpy.ndarray) -> polars.DataFrame:
     """Resamples the Gaia XP spectra to the science frame wavelength."""
@@ -401,7 +493,11 @@ def _interp_gaia_xp_udf(
 
 
 def _calc_sensitivity_udf(
-    row: dict, wave: numpy.ndarray, ext: numpy.ndarray, secz: float, exp_time: float
+    row: dict,
+    wave: numpy.ndarray,
+    ext: numpy.ndarray,
+    secz: float,
+    exp_time: float,
 ) -> dict:
     """Calculates the sensitivity function for a given source."""
 
@@ -409,10 +505,9 @@ def _calc_sensitivity_udf(
     sky_corr = numpy.array(row["sky_corr"], dtype=numpy.float32)
 
     flux_corrected = ((flux - sky_corr) / exp_time) * 10 ** (0.4 * ext * secz)
-    flux_corrected = flux_corrected.tolist()
 
     if row["flux_xp_resampled"] is None:
-        return {"flux_corrected": flux_corrected}
+        return {"flux_corrected": flux_corrected.tolist()}
 
     flux_xp_resampled = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
 
@@ -422,7 +517,7 @@ def _calc_sensitivity_udf(
     sens_smooth = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)
 
     return {
-        "flux_corrected": flux_corrected,
+        "flux_corrected": flux_corrected.tolist(),
         "sens": sens.tolist(),
         "sens_smooth": sens_smooth(wave).tolist(),
     }
@@ -466,3 +561,15 @@ def get_weighted_sky_corr(
     sky_corr = hdul["SKY_EAST"].data * weights[0] + hdul["SKY_WEST"].data * weights[1]
 
     return sky_corr.astype(numpy.float64)
+
+
+def get_mean_sensitivity_response(df: polars.DataFrame, use_smooth: bool = True):
+    """Calculates the mean sensitivity response and RMS using biweight statistics."""
+
+    col = "sens_smooth" if use_smooth else "sens"
+    sens_array = df.filter(polars.col.sens.is_not_null())[col].to_numpy()
+
+    sens_rms: numpy.ndarray = biweight_scale(sens_array, axis=0, ignore_nan=True)
+    sens_mean: numpy.ndarray = biweight_location(sens_array, axis=0, ignore_nan=True)
+
+    return sens_mean.astype(numpy.float32), sens_rms.astype(numpy.float32)
