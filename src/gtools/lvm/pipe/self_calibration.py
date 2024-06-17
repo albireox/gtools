@@ -11,23 +11,34 @@ from __future__ import annotations
 import os
 import pathlib
 
+import nptyping
+import numpy
 import peewee
 import polars
+import seaborn
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from matplotlib import pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from scipy import interpolate
 
 from sdsstools.logger import get_logger
 
 from gtools.lvm.pipe.tools import (
+    calculate_secz,
+    filter_channel,
+    get_extinction_correction,
     get_gaiaxp_cone,
+    get_wavelength_array_from_header,
     slitmap_radec_to_xy,
     slitmap_to_polars,
 )
 from gtools.lvm.plotting import plot_rss
 
 
+ARRAY_2D_F32 = nptyping.NDArray[nptyping.Shape["*,*"], nptyping.Float32]
 PathType = os.PathLike | str | pathlib.Path
+
 
 log = get_logger("gtools.lvm.pipe.self_calibration", use_rich_handler=True)
 
@@ -91,10 +102,14 @@ def lvm_fluxcal_self(
 
     hdul = fits.open(hobject)
 
+    data = hdul["PRIMARY"].data.astype(numpy.float32)
+    wave = get_wavelength_array_from_header(hdul[0].header)
+
     slitmap = slitmap_to_polars(hdul["SLITMAP"].data)
 
     bore_ra = hdul[0].header["POSCIRA"]
     bore_dec = hdul[0].header["POSCIDE"]
+    secz = calculate_secz(bore_ra, bore_dec, hdul[0].header["OBSTIME"])
 
     log.info(f"Retrieving Gaia sources around ({bore_ra:.3f}, {bore_dec:.3f}) deg.")
 
@@ -111,18 +126,6 @@ def lvm_fluxcal_self(
         limit=None,
     )
     log.debug(f"{len(gaia_sources)} Gaia DR3 XP sources retrieved.")
-
-    if plot:
-        fig_rss, ax_rss = plot_rss(
-            hdul["PRIMARY"].data,
-            slitmap,
-            fibre_type="science",
-            mode="xy",
-            patch="hex",
-            cmap="mako_r",
-            interactive=False,
-        )
-        fig_rss.savefig(plot_dir / f"{hobject.stem}_map.pdf")
 
     log.debug(
         "Rejecting stars with with separation to "
@@ -157,6 +160,7 @@ def lvm_fluxcal_self(
             valid=polars.col.index.is_in(gaia_valid["index"])
         )
 
+    # Calculate the xy position of the Gaia sources in the slitmap. Mostly for plotting.
     gaia_slitmap_xy = slitmap_radec_to_xy(
         slitmap,
         gaia_sources["ra"].to_numpy(),
@@ -170,39 +174,17 @@ def lvm_fluxcal_self(
     )
 
     if plot:
-        valid_xy = gaia_sources.filter(
-            polars.col.xpmm.is_not_nan(),
-            polars.col.ypmm.is_not_nan(),
-        )
-
-        selected_gaia = valid_xy.filter(polars.col.valid)
-        ax_rss.scatter(
-            selected_gaia["xpmm"],
-            selected_gaia["ypmm"],
-            color="r",
-            marker="*",
-            s=100,
-        )
-
-        not_selected_gaia = valid_xy.filter(polars.col.valid.not_())
-        ax_rss.scatter(
-            not_selected_gaia["xpmm"],
-            not_selected_gaia["ypmm"],
-            color="0.7",
-            marker="*",
-            s=100,
-        )
-
-        fig_rss.savefig(plot_dir / f"{hobject.stem}_map_gaia.pdf")
+        # Plot the IFU map with the Gaia sources, colouring by validity.
+        _plot_ifu_map(data, slitmap, gaia_sources, plot_dir, hobject)
 
     # Create a dataframe of fibre fluxes.
     df = slitmap_sci.clone()
-    flux_ordered = hdul["PRIMARY"].data[df["fiberid"] - 1, :]
+    df = df.insert_at_idx(1, polars.Series("fiber_idx", df["fiberid"] - 1))
 
     df = df.with_columns(
         flux=polars.Series(
-            flux_ordered.tolist(),
-            dtype=polars.Array(polars.Float32, flux_ordered.shape[1]),
+            data[df["fiber_idx"], :],
+            dtype=polars.Array(polars.Float32, data.shape[1]),
         )
     )
 
@@ -226,6 +208,247 @@ def lvm_fluxcal_self(
         how="left",
     )
 
-    print(df)
+    # Resample Gaia XP spectrum to the same wavelength as the science frame.
+    log.debug("Resampling Gaia XP spectra to the same wavelength as the science frame.")
+
+    flux_xp_resampled = (
+        df["wave_xp", "flux_xp"]
+        .map_rows(lambda row: _interp_gaia_xp_udf(wave, *row))
+        .cast(polars.Array(polars.Float32, wave.size))
+    )
+    df = df.with_columns(flux_xp_resampled=flux_xp_resampled.to_series())
+
+    # Retrieve sky corrections.
+    log.debug("Retrieving sky correction.")
+    sky_corr = get_weighted_sky_corr(hobject)
+
+    df = df.with_columns(
+        sky_corr=polars.Series(
+            sky_corr[df["fiber_idx"]],
+            dtype=polars.Array(polars.Float32, sky_corr.shape[1]),
+        )
+    )
+
+    # Get extinction correction.
+    log.debug("Getting extinction correction for LCO.")
+    ext = get_extinction_correction(wave)
+
+    # Calculate the sensitivity function.
+    log.info("Calculating sensitivity function for each source.")
+    sens = map(lambda row: _calc_sensitivity_udf(row, wave, ext, secz), df.to_dicts())
+
+    array_type = polars.Array(polars.Float32, wave.size)
+    sens_df = polars.DataFrame(sens).cast(array_type)
+
+    df = df.with_columns(sens_df)
+
+    _plot_sensitivity_function(df, wave, plot_dir, hobject)
+
+
+def _plot_ifu_map(
+    data: ARRAY_2D_F32,
+    slitmap: polars.DataFrame,
+    gaia_sources: polars.DataFrame,
+    plot_dir: pathlib.Path,
+    hobject: pathlib.Path,
+):
+    """Plot the IFU map with the Gaia sources."""
+
+    fig_rss, ax_rss = plot_rss(
+        data,
+        slitmap,
+        fibre_type="science",
+        mode="xy",
+        patch="hex",
+        cmap="mako_r",
+        interactive=False,
+    )
+    fig_rss.savefig(plot_dir / f"{hobject.stem}_map.pdf")
+
+    seaborn.set_palette("deep")
+
+    valid_xy = gaia_sources.filter(
+        polars.col.xpmm.is_not_nan(),
+        polars.col.ypmm.is_not_nan(),
+    )
+
+    selected_gaia = valid_xy.filter(polars.col.valid)
+    ax_rss.scatter(
+        selected_gaia["xpmm"],
+        selected_gaia["ypmm"],
+        color="r",
+        marker="*",
+        s=100,
+    )
+
+    not_selected_gaia = valid_xy.filter(polars.col.valid.not_())
+    ax_rss.scatter(
+        not_selected_gaia["xpmm"],
+        not_selected_gaia["ypmm"],
+        color="0.7",
+        marker="*",
+        s=100,
+    )
+
+    fig_rss.savefig(plot_dir / f"{hobject.stem}_map_gaia.pdf")
+
+    seaborn.reset_defaults()
 
     plt.close("all")
+
+
+def _plot_sensitivity_function(
+    df: polars.DataFrame,
+    wave: numpy.ndarray,
+    plot_dir: pathlib.Path,
+    hobject: pathlib.Path,
+):
+    """Plot the sensitivity function for each Gaia source."""
+
+    stem = str(plot_dir / f"{hobject.stem}")
+
+    seaborn.set_theme(context="paper", style="ticks", font_scale=0.9)
+
+    gaia = df.filter(polars.col.source_id.is_not_null())
+
+    with plt.ioff():
+        with PdfPages(f"{stem}_sensitivity.pdf") as pdf:
+            for row in gaia.to_dicts():
+                source_id = row["source_id"]
+                fiberid = row["fiberid"]
+                ra = row["ra_gaia"]
+                dec = row["dec_gaia"]
+
+                flux_corrected = numpy.array(row["flux_corrected"], dtype=numpy.float32)
+                flux_xp = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
+
+                flux_corrected /= numpy.nanmedian(flux_corrected)
+                flux_xp /= numpy.max(flux_xp)
+
+                fig, ax = plt.subplots()
+                ax2 = ax.twinx()
+
+                ax2.plot(wave, row["sens_smooth"], "k-", zorder=10, label="Sensitivity")
+
+                ax.plot(
+                    wave,
+                    flux_corrected,
+                    color="0.8",
+                    linestyle="-",
+                    zorder=0,
+                    label="Corrected flux",
+                )
+                ax.plot(
+                    wave,
+                    flux_xp,
+                    color="r",
+                    linestyle="-",
+                    zorder=20,
+                    label="XP flux",
+                )
+
+                ax2.text(
+                    0.5,
+                    0.98,
+                    f"source_id={source_id}\nfiberid={fiberid} ({ra:.3f}, {dec:.3f})",
+                    horizontalalignment="center",
+                    verticalalignment="top",
+                    transform=ax2.transAxes,
+                )
+
+                ax.set_xlabel("Wavelength [A]")
+
+                ax.set_ylabel("Normalised flux")
+                ax2.set_ylabel("Sensitivity response (XP / corrected flux)")
+
+                ax.legend(loc="upper left")
+                ax2.legend(loc="upper right")
+
+                ax.set_ylim(0, 2)
+
+                pdf.savefig(fig)
+                plt.close(fig)
+
+
+def _interp_gaia_xp_udf(
+    wave: numpy.ndarray,
+    xp_wave: numpy.ndarray | None,
+    xp_flux: numpy.ndarray | None,
+) -> polars.Series | None:
+    """Interpolates a Gaia XP spectrum to the science frame wavelength."""
+
+    if xp_wave is None or xp_flux is None:
+        return None
+
+    return polars.Series(numpy.interp(wave, xp_wave, xp_flux))
+
+
+def _calc_sensitivity_udf(
+    row: dict,
+    wave: numpy.ndarray,
+    ext: numpy.ndarray,
+    secz: float,
+) -> dict:
+    """Calculates the sensitivity function for a given source."""
+
+    flux = numpy.array(row["flux"], dtype=numpy.float32)
+    sky_corr = numpy.array(row["sky_corr"], dtype=numpy.float32)
+
+    flux_corrected = ((flux - sky_corr) / 900.0) * 10 ** (0.4 * ext * secz)
+    flux_corrected = flux_corrected.tolist()
+
+    if row["flux_xp_resampled"] is None:
+        return {"flux_corrected": flux_corrected}
+
+    flux_xp_resampled = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
+
+    sens = flux_xp_resampled / flux_corrected
+
+    wgood, sgood = filter_channel(wave, sens, 2)
+    sens_smooth = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)
+
+    return {
+        "flux_corrected": flux_corrected,
+        "sens": sens.tolist(),
+        "sens_smooth": sens_smooth(wave).tolist(),
+    }
+
+
+def get_weighted_sky_corr(
+    file: PathType,
+    weights: tuple[float, float] | None = None,
+) -> ARRAY_2D_F32:
+    """Returns the weighted sky correction array.
+
+    Parameters
+    ----------
+    file
+        The file containing the measured sky values. It must include extensions
+        ``SKY_EAST`` and ``SKY_WEST``.
+    weights
+        The weights to apply to the sky values (first element for east, second
+        for west). If ``None``, tries to use the ``SKYEW`` and ``SKYWW`` header
+        values. Otherwise defaults to equal weights.
+
+    Returns
+    -------
+    sky_corr
+        RSS array with the sky correction for each fibre.
+
+    """
+
+    hdul = fits.open(file)
+
+    assert "SKY_EAST" in hdul, "SKY_EAST extension not found."
+    assert "SKY_WEST" in hdul, "SKY_WEST extension not found."
+
+    if weights is None:
+        prim_header = hdul[0].header
+        if "SKYEW" in prim_header and "SKYWW" in prim_header:
+            weights = (prim_header["SKYEW"], prim_header["SKYWW"])
+        else:
+            weights = (0.5, 0.5)
+
+    sky_corr = hdul["SKY_EAST"].data * weights[0] + hdul["SKY_WEST"].data * weights[1]
+
+    return sky_corr.astype(numpy.float64)
