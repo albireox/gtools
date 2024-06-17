@@ -37,6 +37,9 @@ from gtools.lvm.pipe.tools import (
 from gtools.lvm.plotting import plot_rss
 
 
+__all__ = ["fluxcal_self_calibration"]
+
+
 ARRAY_2D_F32 = nptyping.NDArray[nptyping.Shape["*,*"], nptyping.Float32]
 PathType = os.PathLike | str | pathlib.Path
 
@@ -44,7 +47,7 @@ PathType = os.PathLike | str | pathlib.Path
 log = get_logger("gtools.lvm.pipe.flux_calibration", use_rich_handler=True)
 
 
-def lvm_fluxcal_self(
+def fluxcal_self_calibration(
     hobject: PathType,
     connection: peewee.PostgresqlDatabase | None = None,
     silent: bool = False,
