@@ -177,7 +177,7 @@ def lvm_fluxcal_self(
 
     if plot:
         # Plot the IFU map with the Gaia sources, colouring by validity.
-        _plot_ifu_map(data, slitmap, gaia_sources, plot_dir, hobject)
+        _plot_ifu_map(data, slitmap, gaia_sources, str(plot_dir / hobject.stem))
 
     # Create a dataframe of fibre fluxes.
     df = slitmap_sci.clone()
@@ -212,13 +212,7 @@ def lvm_fluxcal_self(
 
     # Resample Gaia XP spectrum to the same wavelength as the science frame.
     log.debug("Resampling Gaia XP spectra to the same wavelength as the science frame.")
-
-    flux_xp_resampled = (
-        df["wave_xp", "flux_xp"]
-        .map_rows(lambda row: _interp_gaia_xp_udf(wave, *row))
-        .cast(polars.Array(polars.Float32, wave.size))
-    )
-    df = df.with_columns(flux_xp_resampled=flux_xp_resampled.to_series())
+    df = _resample_gaia_xp(df, wave)
 
     # Retrieve sky corrections.
     log.debug("Retrieving sky correction.")
@@ -241,20 +235,26 @@ def lvm_fluxcal_self(
         lambda row: _calc_sensitivity_udf(row, wave, ext, secz, exp_time), df.to_dicts()
     )
 
-    array_type = polars.Array(polars.Float32, wave.size)
-    sens_df = polars.DataFrame(sens).cast(array_type)
+    ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
+    sens_df = polars.DataFrame(sens).cast(ARRAY_TYPE)
 
     df = df.with_columns(sens_df)
 
-    _plot_sensitivity_function(df, wave, plot_dir, hobject)
+    if plot:
+        # Plot the sensitivity function for each Gaia source.
+        stem = str(plot_dir / f"{hobject.stem}")
+        plot_file_path = f"{stem}_sensitivity.pdf"
+
+        _plot_sensitivity_function(df, wave, plot_file_path)
+
+    return df
 
 
 def _plot_ifu_map(
     data: ARRAY_2D_F32,
     slitmap: polars.DataFrame,
     gaia_sources: polars.DataFrame,
-    plot_dir: pathlib.Path,
-    hobject: pathlib.Path,
+    plot_file_stem: str,
 ):
     """Plot the IFU map with the Gaia sources."""
 
@@ -267,7 +267,7 @@ def _plot_ifu_map(
         cmap="mako_r",
         interactive=False,
     )
-    fig_rss.savefig(plot_dir / f"{hobject.stem}_map.pdf")
+    fig_rss.savefig(f"{plot_file_stem}_map.pdf")
 
     seaborn.set_palette("deep")
 
@@ -294,7 +294,7 @@ def _plot_ifu_map(
         s=100,
     )
 
-    fig_rss.savefig(plot_dir / f"{hobject.stem}_map_gaia.pdf")
+    fig_rss.savefig(f"{plot_file_stem}_map_gaia.pdf")
 
     seaborn.reset_defaults()
 
@@ -304,19 +304,16 @@ def _plot_ifu_map(
 def _plot_sensitivity_function(
     df: polars.DataFrame,
     wave: numpy.ndarray,
-    plot_dir: pathlib.Path,
-    hobject: pathlib.Path,
+    file_path: PathType,
 ):
     """Plot the sensitivity function for each Gaia source."""
-
-    stem = str(plot_dir / f"{hobject.stem}")
 
     seaborn.set_theme(context="paper", style="ticks", font_scale=0.9)
 
     gaia = df.filter(polars.col.source_id.is_not_null())
 
     with plt.ioff():
-        with PdfPages(f"{stem}_sensitivity.pdf") as pdf:
+        with PdfPages(file_path) as pdf:
             for row in gaia.to_dicts():
                 source_id = row["source_id"]
                 fiberid = row["fiberid"]
@@ -375,6 +372,19 @@ def _plot_sensitivity_function(
 
                 pdf.savefig(fig)
                 plt.close(fig)
+
+
+def _resample_gaia_xp(df: polars.DataFrame, wave: numpy.ndarray) -> polars.DataFrame:
+    """Resamples the Gaia XP spectra to the science frame wavelength."""
+
+    flux_xp_resampled = (
+        df["wave_xp", "flux_xp"]
+        .map_rows(lambda row: _interp_gaia_xp_udf(wave, *row))
+        .cast(polars.Array(polars.Float32, wave.size))
+    )
+    df = df.with_columns(flux_xp_resampled=flux_xp_resampled.to_series())
+
+    return df
 
 
 def _interp_gaia_xp_udf(
