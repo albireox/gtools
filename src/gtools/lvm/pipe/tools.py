@@ -40,6 +40,8 @@ __all__ = [
     "filter_channel",
 ]
 
+PathType = os.PathLike | str | pathlib.Path
+
 ARRAY_1D = npt.NDArray[npt.Shape["*"], npt.Float]
 ARRAY_2D = npt.NDArray[npt.Shape["*,*"], npt.Float]
 
@@ -236,6 +238,75 @@ def _W_to_erg(data: float | Sequence[float]) -> float | Sequence[float]:
 
     flux = factor * numpy.array(data, dtype=numpy.float32)
     return flux.tolist()
+
+
+def get_standard_info(file: PathType):
+    """Returns a data frame with the standard information from the header.
+
+    Parameters
+    ----------
+    file
+        The path to the FITS file. Assumes that the first extension is the
+        primary header with all the pointing and observational informational.
+
+    Returns
+    -------
+    data
+        A Polars data frame with the standards.
+
+    """
+
+    header = fits.getheader(file, 0)
+    ccd = header.get("CCD", None).upper()
+
+    data: list[dict] = []
+
+    for istd in range(1, 16):
+        data.append(
+            {
+                "std_id": istd,
+                "source_id": header.get(f"STD{istd}ID", None),
+                "ra": header.get(f"STD{istd}RA", None),
+                "dec": header.get(f"STD{istd}DE", None),
+                "acquired": header.get(f"STD{istd}ACQ", None),
+                "t0": header.get(f"STD{istd}T0", None),
+                "t1": header.get(f"STD{istd}T1", None),
+                "exp_time": header.get(f"STD{istd}EXP", None),
+                "fibre": header.get(f"STD{istd}FIB", None),
+                "m_ab": header.get(f"STD{istd}{ccd}AB", None),
+                "m_inst": header.get(f"STD{istd}{ccd}IN", None),
+            }
+        )
+
+    df = polars.DataFrame(
+        data,
+        schema={
+            "std_id": polars.Int16,
+            "source_id": polars.Int64,
+            "ra": polars.Float64,
+            "dec": polars.Float64,
+            "secz": polars.Float32,
+            "acquired": polars.Boolean,
+            "t0": polars.String,
+            "t1": polars.String,
+            "exp_time": polars.Float32,
+            "fibre": polars.String,
+            "m_ab": polars.Float32,
+            "m_inst": polars.Float32,
+        },
+    )
+
+    secz_data = []
+    for row in df.iter_rows(named=True):
+        if row["ra"] is None or row["dec"] is None:
+            secz_data.append(None)
+            continue
+        secz = calculate_secz(row["ra"], row["dec"], row["t0"])
+        secz_data.append(secz)
+
+    df = df.with_columns(secz=polars.Series(secz_data, dtype=polars.Float32))
+
+    return df
 
 
 def slitmap_to_polars(

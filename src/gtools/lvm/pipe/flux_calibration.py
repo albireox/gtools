@@ -29,7 +29,9 @@ from gtools.lvm.pipe.tools import (
     calculate_secz,
     filter_channel,
     get_extinction_correction,
+    get_gaiaxp,
     get_gaiaxp_cone,
+    get_standard_info,
     get_wavelength_array_from_header,
     slitmap_radec_to_xy,
     slitmap_to_polars,
@@ -37,7 +39,7 @@ from gtools.lvm.pipe.tools import (
 from gtools.lvm.plotting import plot_rss
 
 
-__all__ = ["fluxcal_self_calibration"]
+__all__ = ["flux_calibration_self", "flux_calibration"]
 
 
 ARRAY_2D_F32 = nptyping.NDArray[nptyping.Shape["*,*"], nptyping.Float32]
@@ -47,7 +49,107 @@ PathType = os.PathLike | str | pathlib.Path
 log = get_logger("gtools.lvm.pipe.flux_calibration", use_rich_handler=True)
 
 
-def fluxcal_self_calibration(
+def flux_calibration(
+    hobject: PathType,
+    connection: peewee.PostgresqlDatabase | None = None,
+    silent: bool = False,
+    plot: bool = False,
+    plot_dir: PathType | None = None,
+):
+    """Performs flux calibration using the observed standards.
+
+    Parameters
+    ----------
+    hobject
+        The path to the ``hobject`` file. This must be final stage of the ``hobject``
+        file, after flux calibration has been performed and the sensitivity functions
+        have been added to the ``FLUXCAL`` extension, but before the flux calibration
+        has been applied to the data (the ``lvmFFrame`` file).
+    connection
+        The database connection to ``sdss5db`` used to retrieve the Gaia sources.
+        If ``None``, uses the default connection from ``sdssdb``.
+    silent
+        If ``True``, does not print any output.
+    plot
+        If ``True``, generate plots.
+    plot_dir
+        The directory where to save the plots. If ``None``, defaults to the
+        directory where the ``hobject`` file is located.
+
+    Returns
+    -------
+    df
+        A DataFrame with the sensitivity function for each standard star.
+
+    """
+
+    if silent is False:
+        log.sh.setLevel(5)
+    else:
+        log.sh.setLevel(100)
+
+    hobject = pathlib.Path(hobject).absolute()
+
+    if not hobject.exists():
+        raise FileNotFoundError(f"{hobject} does not exist.")
+
+    if plot_dir is None:
+        plot_dir = hobject.parent
+    else:
+        plot_dir = pathlib.Path(plot_dir).absolute()
+
+    plot_stem = str(plot_dir / f"{hobject.stem}")
+
+    if connection is None:
+        log.warning("No connection provided. Using default connection from sdssdb.")
+        from sdssdb.peewee.sdss5db import database as connection
+
+    log.info(f"Processing file {hobject!s}")
+
+    hdul = fits.open(hobject)
+
+    data = hdul["PRIMARY"].data.astype(numpy.float32)
+
+    wave = get_wavelength_array_from_header(hdul[0].header)
+    ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
+
+    slitmap = slitmap_to_polars(hdul["SLITMAP"].data)
+    std_map = slitmap.filter(polars.col.targettype == "standard")
+
+    standards = get_standard_info(hobject)
+    standards = standards.rename({"ra": "ra_std", "dec": "dec_std"})
+
+    df = std_map.join(standards, left_on="orig_ifulabel", right_on="fibre")
+    df = df.insert_at_idx(1, polars.Series("fiber_idx", df["fiberid"] - 1))
+
+    flux = data[df["fiber_idx"], :]
+
+    df = df.with_columns(flux=polars.Series(flux, dtype=ARRAY_TYPE))
+
+    log.debug("Retrieving Gaia sources.")
+
+    gaia_data = [
+        get_gaiaxp(connection, row["source_id"])
+        for row in df.iter_rows(named=True)
+        if row["source_id"]
+    ]
+    gaia_data = polars.concat([row for row in gaia_data if row is not None])
+    gaia_data = gaia_data.rename({"ra": "ra_gaia", "dec": "dec_gaia"})
+
+    df = df.join(gaia_data, on="source_id")
+
+    df = _post_process_flux_calibration_df(
+        df,
+        wave,
+        hobject,
+        plot=plot,
+        plot_stem=plot_stem,
+    )
+
+    return df
+
+
+def flux_calibration_self(
     hobject: PathType,
     connection: peewee.PostgresqlDatabase | None = None,
     silent: bool = False,
@@ -84,6 +186,12 @@ def fluxcal_self_calibration(
     max_sep
         The maximum separation to a fibre centre, in arcsec, to consider a star
         as a calibration source.
+
+    Returns
+    -------
+    df
+        A DataFrame with the corrected fluxes for each science fibre and the
+        sensitivity function for each matched Gaia star.
 
     """
 
@@ -216,6 +324,46 @@ def fluxcal_self_calibration(
         how="left",
     )
 
+    # Add secz and exp_time columns. _post_process_flux_calibration_df will
+    # use them to apply the extinction correction.
+    df = df.with_columns(secz=polars.lit(secz), exp_time=polars.lit(exp_time))
+
+    df = _post_process_flux_calibration_df(
+        df,
+        wave,
+        hobject,
+        plot=plot,
+        plot_stem=plot_stem,
+    )
+
+    return df
+
+
+def _post_process_flux_calibration_df(
+    df: polars.DataFrame,
+    wave: numpy.ndarray,
+    hobject: pathlib.Path,
+    plot: bool = False,
+    plot_stem: str | None = None,
+):
+    """Helper function common to ``flux_calibration`` and ``flux_calibration_self``.
+
+    This function receives a data frame that includes the fluxes for each relevant
+    fibre and associated Gaia XP fluxes. It performs the following tasks:
+
+    - Resamples the Gaia XP spectra to the same wavelength as the LVM frame.
+    - Retrieves and applies the sky correction for the LVM frame.
+    - Retrieves the extinction correction for LCO and applies it.
+    - Calculates the sensitivity function for each source.
+    - Optionally, plots the sensitivity functions.
+
+    Returns the data frame with the sensitivity functions added.
+
+    """
+
+    if plot:
+        assert plot_stem is not None, "plot_stem must be provided if plot is True."
+
     # Resample Gaia XP spectrum to the same wavelength as the science frame.
     log.debug("Resampling Gaia XP spectra to the same wavelength as the science frame.")
     df = _resample_gaia_xp(df, wave)
@@ -238,7 +386,8 @@ def fluxcal_self_calibration(
     # Calculate the sensitivity function.
     log.info("Calculating sensitivity function for each source.")
     sens = map(
-        lambda row: _calc_sensitivity_udf(row, wave, ext, secz, exp_time), df.to_dicts()
+        lambda row: _calc_sensitivity_udf(row, wave, ext, row["secz"], row["exp_time"]),
+        df.to_dicts(),
     )
 
     ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
@@ -257,10 +406,20 @@ def fluxcal_self_calibration(
         log.info("Plotting sensitivity functions.")
 
         # Plot the sensitivity function for each Gaia source.
-        _plot_sensitivity_functions(df, wave, f"{plot_stem}_sensitivity.pdf")
+        _plot_sensitivity_functions(
+            df,
+            wave,
+            f"{plot_stem}_sensitivity.pdf",
+            title=hobject.name,
+        )
 
         # Plot mean sensitivity function and residuals.
-        _plot_sensitivity_mean(df, wave, f"{plot_stem}_sensitivity_mean.pdf")
+        _plot_sensitivity_mean(
+            df,
+            wave,
+            f"{plot_stem}_sensitivity_mean.pdf",
+            title=hobject.name,
+        )
 
     return df
 
@@ -320,6 +479,7 @@ def _plot_sensitivity_functions(
     df: polars.DataFrame,
     wave: numpy.ndarray,
     file_path: PathType,
+    title: str | None = None,
 ):
     """Plot the sensitivity function for each Gaia source."""
 
@@ -377,6 +537,8 @@ def _plot_sensitivity_functions(
                 # Labels and legeneds
                 ax.set_xlabel("Wavelength [A]")
 
+                ax.set_title(title)
+
                 ax.set_ylabel("Normalised flux")
                 ax2.set_ylabel("Sensitivity response (XP / corrected flux)")
 
@@ -388,6 +550,7 @@ def _plot_sensitivity_functions(
                 pdf.savefig(fig)
                 plt.close(fig)
 
+    plt.close("all")
     seaborn.reset_defaults()
 
 
@@ -395,6 +558,7 @@ def _plot_sensitivity_mean(
     df: polars.DataFrame,
     wave: numpy.ndarray,
     plot_file_path: str,
+    title: str | None = None,
 ):
     """Plot the mean sensitivity function and residuals."""
 
@@ -454,6 +618,8 @@ def _plot_sensitivity_mean(
         ax_res.set_xlabel("Wavelength [A]")
         ax_res.set_ylabel("Rel. residuals")
 
+        ax.set_title(title)
+
         # Remove the first y-tick label to avoid overlap with the second axis.
         y_ticks = ax.yaxis.get_major_ticks()
         y_ticks[0].label1.set_visible(False)
@@ -465,6 +631,7 @@ def _plot_sensitivity_mean(
 
         fig.savefig(plot_file_path)
 
+    plt.close("all")
     seaborn.reset_defaults()
 
 
