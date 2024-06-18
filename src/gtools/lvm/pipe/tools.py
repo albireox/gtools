@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import pathlib
 
-from typing import Sequence
+from typing import Literal, Sequence
 
 import nptyping as npt
 import numpy
@@ -24,7 +24,7 @@ from astropy.table import Table
 from astropy.time import Time
 from scipy import signal
 from scipy.integrate import simps
-from scipy.interpolate import LinearNDInterpolator
+from scipy.interpolate import LinearNDInterpolator, interp1d
 
 
 __all__ = [
@@ -494,3 +494,116 @@ def spec_to_mAB(lam, spec, lamf, filt):
         mab = -9999.9
 
     return mab
+
+
+def get_sky_mask_uves(wave: ARRAY_1D, width: float = 3, threshold: float = 2):
+    """Generate a mask for the bright sky lines.
+
+    Mask every line at +/- width, where width in same units as wave (Angstroms).
+    Only lines with a flux larger than threshold (in 10E-16 ergs/cm^2/s/A) are masked.
+    The line list is from https://www.eso.org/observing/dfo/quality/UVES/pipeline/sky_spectrum.html
+
+    Returns a bool Numpy array the same size as wave with sky line wavelengths
+    marked as ``True``.
+
+    """
+
+    LVMCORE_DIR = os.getenv("LVMCORE_DIR")
+    assert LVMCORE_DIR is not None, "LVMCORE_DIR is not set."
+
+    p = os.path.join(LVMCORE_DIR, "etc", "UVES_sky_lines.txt")
+    txt = numpy.genfromtxt(p)
+    skyw, skyf = txt[:, 1], txt[:, 4]
+
+    select = skyf > threshold
+    lines = skyw[select]
+
+    # Do NOT mask Ha if it is present in the sky table
+    ha = (lines > 6562) & (lines < 6564)
+    lines = lines[~ha]
+
+    # Create the mask.
+    mask = numpy.zeros_like(wave, dtype=bool)
+    if width > 0.0:
+        for line in lines:
+            if (line <= wave[0]) or (line >= wave[-1]):
+                continue
+            ii = numpy.where((wave >= line - width) & (wave <= line + width))[0]
+            mask[ii] = True
+
+    return mask
+
+
+def get_z_continuum_mask(wave: numpy.ndarray):
+    """Some clean regions at the red edge of the NIR channel (hand picked).
+
+    This is a positive mask, i.e., the regions to be masked are marked as ``True``
+    are sky-free regions.
+
+    """
+
+    good = [
+        [9230, 9280],
+        [9408, 9415],
+        [9464, 9472],
+        [9608, 9512],
+        [9575, 9590],
+        [9593, 9603],
+        [9640, 9650],
+        [9760, 9775],
+    ]
+    mask = numpy.zeros_like(wave, dtype=bool)
+    for r in good:
+        if (r[0] <= wave[0]) or (r[1] >= wave[-1]):
+            continue
+        ii = numpy.where((wave >= r[0]) & (wave <= r[1]))[0]
+        mask[ii] = True
+
+    # Do not mask before first region
+    mask[numpy.where(wave <= good[0][0])] = True
+
+    return mask
+
+
+def interpolate_mask(
+    x: numpy.ndarray,
+    y: numpy.ndarray,
+    mask: numpy.ndarray,
+    kind: str = "linear",
+    fill_value: float | numpy.ndarray | Literal["extrapolate"] = "extrapolate",
+):
+    """Interpolates missing values in an array.
+
+    Parameters
+    ----------
+    x, y
+        Numpy arrays, samples and values.
+    mask
+        Boolean mask, ``True`` for masked values.
+    kind
+        Interpolation method, one of ``'linear'``, ``'nearest'``,
+        ``'nearest-up'``, ``'zero'``, ``'slinear'``, ``'quadratic'``,
+        ``'cubic'``, ``'previous'``, or ``'next'``.
+    fill_value
+        Which value to use for filling up data outside the convex hull of
+        known pixel values. Default is 0, Has no effect for ``'nearest'``.
+
+    Returns
+    -------
+    data
+        The input array with missing values interpolated
+
+    """
+
+    if not numpy.any(mask):
+        return y
+
+    known_x, known_v = x[~mask], y[~mask]
+    missing_x = x[mask]
+    missing_idx = numpy.where(mask)
+
+    f = interp1d(known_x, known_v, kind=kind, fill_value=fill_value)  # type: ignore
+    yy = y.copy()
+    yy[missing_idx] = f(missing_x)
+
+    return yy

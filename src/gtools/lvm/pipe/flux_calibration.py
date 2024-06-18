@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import pathlib
 
+from typing import Literal
+
 import nptyping
 import numpy
 import peewee
@@ -31,8 +33,11 @@ from gtools.lvm.pipe.tools import (
     get_extinction_correction,
     get_gaiaxp,
     get_gaiaxp_cone,
+    get_sky_mask_uves,
     get_standard_info,
     get_wavelength_array_from_header,
+    get_z_continuum_mask,
+    interpolate_mask,
     slitmap_radec_to_xy,
     slitmap_to_polars,
 )
@@ -113,6 +118,8 @@ def flux_calibration(
     wave = get_wavelength_array_from_header(hdul[0].header)
     ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
 
+    channel = hdul[0].header["CCD"].lower()
+
     slitmap = slitmap_to_polars(hdul["SLITMAP"].data)
     std_map = slitmap.filter(polars.col.targettype == "standard")
 
@@ -140,6 +147,7 @@ def flux_calibration(
 
     df = _post_process_flux_calibration_df(
         df,
+        channel,
         wave,
         hobject,
         plot=plot,
@@ -152,12 +160,13 @@ def flux_calibration(
 def flux_calibration_self(
     hobject: PathType,
     connection: peewee.PostgresqlDatabase | None = None,
-    silent: bool = False,
-    plot: bool = False,
-    plot_dir: PathType | None = None,
     gmag_limit: float | None = None,
     nstar_limit: int | None = None,
     max_sep: float = 7.0,
+    reject_multiple_per_fibre: bool | Literal["keep_brightest"] = True,
+    silent: bool = False,
+    plot: bool = False,
+    plot_dir: PathType | None = None,
 ):
     """Performs flux calibration of a science frame using stars in the field.
 
@@ -171,13 +180,6 @@ def flux_calibration_self(
     connection
         The database connection to ``sdss5db`` used to retrieve the Gaia sources.
         If ``None``, uses the default connection from ``sdssdb``.
-    silent
-        If ``True``, does not print any output.
-    plot
-        If ``True``, generate plots.
-    plot_dir
-        The directory where to save the plots. If ``None``, defaults to the
-        directory where the ``hobject`` file is located.
     gmag_limit
         The limit in G magnitude for the Gaia sources. If ``None``, no limit is applied.
     nstar_limit
@@ -186,6 +188,17 @@ def flux_calibration_self(
     max_sep
         The maximum separation to a fibre centre, in arcsec, to consider a star
         as a calibration source.
+    reject_multiple_per_fibre
+        If ``True``, rejects all stars that fall on the same fibre as another star.
+        ``False`` will consider all the stars valid. If ``keep_brightest``, fibres with
+        more than one star will keep the brightest one in the G band.
+    silent
+        If ``True``, does not print any output.
+    plot
+        If ``True``, generate plots.
+    plot_dir
+        The directory where to save the plots. If ``None``, defaults to the
+        directory where the ``hobject`` file is located.
 
     Returns
     -------
@@ -199,6 +212,9 @@ def flux_calibration_self(
         log.sh.setLevel(5)
     else:
         log.sh.setLevel(100)
+
+    if reject_multiple_per_fibre not in [True, False, "keep_brightest"]:
+        raise ValueError("Invalid value for reject_multiple_per_fibre.")
 
     hobject = pathlib.Path(hobject).absolute()
 
@@ -218,6 +234,8 @@ def flux_calibration_self(
 
     data = hdul["PRIMARY"].data.astype(numpy.float32)
     wave = get_wavelength_array_from_header(hdul[0].header)
+
+    channel = hdul[0].header["CCD"].lower()
 
     slitmap = slitmap_to_polars(hdul["SLITMAP"].data)
 
@@ -263,8 +281,25 @@ def flux_calibration_self(
     # fall on the same fibre as invalid.
     gaia_sources = gaia_sources.with_row_index("index", 1)
 
-    gaia_sources_dup = gaia_sources["fiberid"].is_duplicated()
-    gaia_sources[gaia_sources_dup.arg_true(), "valid"] = False
+    # Deal with fibres that have more than one star associated with them.
+    if reject_multiple_per_fibre is True:
+        # Reject all stars that have a duplicate fibre.
+        gaia_sources_dup = gaia_sources["fiberid"].is_duplicated()
+        gaia_sources[gaia_sources_dup.arg_true(), "valid"] = False
+    elif reject_multiple_per_fibre == "keep_brightest":
+        # Keep the brightest star in the G band.
+        valid_gaia = (
+            gaia_sources.filter(polars.col.valid)
+            .group_by("fiberid")
+            .agg(polars.col.source_id.top_k_by("phot_g_mean_mag", k=1))
+            .explode("source_id")
+        )
+        gaia_sources = gaia_sources.with_columns(
+            valid=polars.col.source_id.is_in(valid_gaia["source_id"])
+        )
+    else:
+        # Keep all.
+        pass
 
     log.info(f"Number of Gaia sources within max_sep: {gaia_sources['valid'].sum()}")
 
@@ -330,6 +365,7 @@ def flux_calibration_self(
 
     df = _post_process_flux_calibration_df(
         df,
+        channel,
         wave,
         hobject,
         plot=plot,
@@ -341,6 +377,7 @@ def flux_calibration_self(
 
 def _post_process_flux_calibration_df(
     df: polars.DataFrame,
+    channel: str,
     wave: numpy.ndarray,
     hobject: pathlib.Path,
     plot: bool = False,
@@ -379,6 +416,12 @@ def _post_process_flux_calibration_df(
         )
     )
 
+    # Get the sky masks.
+    sky_mask = get_sky_mask_uves(wave, width=3)
+    sky_mask_z: numpy.ndarray | None = None
+    if channel == "z":
+        sky_mask_z = get_z_continuum_mask(wave)
+
     # Get extinction correction.
     log.debug("Getting extinction correction for LCO.")
     ext = get_extinction_correction(wave)
@@ -386,7 +429,16 @@ def _post_process_flux_calibration_df(
     # Calculate the sensitivity function.
     log.info("Calculating sensitivity function for each source.")
     sens = map(
-        lambda row: _calc_sensitivity_udf(row, wave, ext, row["secz"], row["exp_time"]),
+        lambda row: _calc_sensitivity_udf(
+            row,
+            wave,
+            ext,
+            channel,
+            sky_mask=sky_mask,
+            sky_mask_z=sky_mask_z,
+            secz=row["secz"],
+            exp_time=row["exp_time"],
+        ),
         df.to_dicts(),
     )
 
@@ -489,7 +541,7 @@ def _plot_sensitivity_functions(
 
     with plt.ioff():
         with PdfPages(file_path) as pdf:
-            for row in gaia.to_dicts():
+            for nn, row in enumerate(gaia.to_dicts()):
                 source_id = row["source_id"]
                 fiberid = row["fiberid"]
                 ra = row["ra_gaia"]
@@ -498,7 +550,7 @@ def _plot_sensitivity_functions(
                 flux_corrected = numpy.array(row["flux_corrected"], dtype=numpy.float32)
                 flux_xp = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
 
-                sens_smooth = row["sens_smooth"]
+                sens_smooth = numpy.array(row["sens_smooth"])
 
                 flux_corrected /= numpy.nanmedian(flux_corrected[500:-500])
                 flux_xp /= numpy.nanmedian(flux_xp)
@@ -537,12 +589,13 @@ def _plot_sensitivity_functions(
                 # Labels and legeneds
                 ax.set_xlabel("Wavelength [A]")
 
-                ax.set_title(title)
+                if nn == 0:
+                    ax.set_title(title)
+
+                ax.set_ylim(min([-0.2, flux_xp.min() * 0.7]), flux_xp.max() * 1.2)
 
                 ax.set_ylabel("Normalised flux")
                 ax2.set_ylabel("Sensitivity response (XP / corrected flux)")
-
-                ax.set_ylim(0, 2)
 
                 ax.legend(loc="upper left")
                 ax2.legend(loc="upper right")
@@ -627,7 +680,7 @@ def _plot_sensitivity_mean(
         # Force xlims which may have changed.
         ax_res.set_xlim(xlim0, xlim1)
 
-        ax.set_ylim(1e-14, 1e-13)
+        ax.set_ylim(sens_mean.min() * 0.8, sens_mean.max() * 1.1)
 
         fig.savefig(plot_file_path)
 
@@ -665,15 +718,38 @@ def _calc_sensitivity_udf(
     row: dict,
     wave: numpy.ndarray,
     ext: numpy.ndarray,
-    secz: float,
-    exp_time: float,
+    channel: str,
+    sky_mask: numpy.ndarray | None = None,
+    sky_mask_z: numpy.ndarray | None = None,
+    secz: float = 1.0,
+    exp_time: float = 900.0,
 ) -> dict:
     """Calculates the sensitivity function for a given source."""
 
     flux = numpy.array(row["flux"], dtype=numpy.float32)
     sky_corr = numpy.array(row["sky_corr"], dtype=numpy.float32)
 
-    flux_corrected = ((flux - sky_corr) / exp_time) * 10 ** (0.4 * ext * secz)
+    flux_skycorr = (flux - sky_corr) / exp_time
+
+    if sky_mask is not None:
+        flux_skycorr = interpolate_mask(
+            wave,
+            flux_skycorr,
+            sky_mask,
+            fill_value="extrapolate",
+        )
+
+    if channel == "z" and sky_mask_z is not None:
+        # The z mask is a positive one, so we negate it to get the regions
+        # to interpolate over.
+        flux_skycorr = interpolate_mask(
+            wave,
+            flux_skycorr,
+            ~sky_mask_z,
+            fill_value="extrapolate",
+        )
+
+    flux_corrected = (flux_skycorr) * 10 ** (0.4 * ext * secz)
 
     if row["flux_xp_resampled"] is None:
         return {"flux_corrected": flux_corrected.tolist()}
