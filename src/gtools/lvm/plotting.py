@@ -15,10 +15,7 @@ import nptyping as npt
 import numpy
 import polars
 import seaborn
-from astropy.visualization import (
-    ImageNormalize,
-    ZScaleInterval,
-)
+from astropy.visualization import ImageNormalize, LogStretch, MinMaxInterval
 from matplotlib.collections import PatchCollection
 from matplotlib.patches import Circle, Patch, RegularPolygon
 
@@ -105,7 +102,11 @@ def plot_rss(
             & (wavelength_array <= wavelength_range[1]),
         ]
 
-    data_flat = data_type.sum(axis=1) if func == "sum" else data_type.mean(axis=1)
+    data_flat = (
+        numpy.nansum(data_type, axis=1)
+        if func == "sum"
+        else numpy.nanmean(data_type, axis=1)
+    )
 
     slitmap_type = slitmap_type.with_columns(data_flat=data_flat)
 
@@ -145,7 +146,8 @@ def plot_rss(
                 )
 
         data_array = slitmap_type["data_flat"]
-        norm = ImageNormalize(interval=ZScaleInterval())
+
+        norm = ImageNormalize(interval=MinMaxInterval(), stretch=LogStretch())  # type: ignore
 
         collection = PatchCollection(
             patches,
