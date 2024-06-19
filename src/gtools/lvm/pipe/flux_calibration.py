@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
+import uuid
 
 from typing import Literal
 
@@ -20,12 +22,12 @@ import polars
 import seaborn
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-from astropy.stats import biweight_location, biweight_scale
+from astropy.stats import biweight_location, biweight_scale, sigma_clip
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import interpolate
 
-from sdsstools.logger import get_logger
+from sdsstools.logger import SDSSLogger, get_logger
 
 from gtools.lvm.pipe.tools import (
     calculate_secz,
@@ -49,9 +51,6 @@ __all__ = ["flux_calibration_self", "flux_calibration"]
 
 ARRAY_2D_F32 = nptyping.NDArray[nptyping.Shape["*,*"], nptyping.Float32]
 PathType = os.PathLike | str | pathlib.Path
-
-
-log = get_logger("gtools.lvm.pipe.flux_calibration", use_rich_handler=True)
 
 
 def flux_calibration(
@@ -87,6 +86,8 @@ def flux_calibration(
         A DataFrame with the sensitivity function for each standard star.
 
     """
+
+    log = get_logger(uuid.uuid4().hex[:8])
 
     if silent is False:
         log.sh.setLevel(5)
@@ -133,7 +134,7 @@ def flux_calibration(
 
     df = df.with_columns(flux=polars.Series(flux, dtype=ARRAY_TYPE))
 
-    log.debug("Retrieving Gaia sources.")
+    log.debug(f"{hobject.name}: retrieving Gaia sources.")
 
     gaia_data = [
         get_gaiaxp(connection, row["source_id"])
@@ -150,6 +151,7 @@ def flux_calibration(
         channel,
         wave,
         hobject,
+        log,
         plot=plot,
         plot_stem=plot_stem,
     )
@@ -167,6 +169,7 @@ def flux_calibration_self(
     silent: bool = False,
     plot: bool = False,
     plot_dir: PathType | None = None,
+    write_log: bool = True,
 ):
     """Performs flux calibration of a science frame using stars in the field.
 
@@ -200,6 +203,8 @@ def flux_calibration_self(
     plot_dir
         The directory where to save the plots. If ``None``, defaults to the
         directory where the ``hobject`` file is located.
+    write_log
+        If ``True``, writes a log file with the results.
 
     Returns
     -------
@@ -209,27 +214,42 @@ def flux_calibration_self(
 
     """
 
-    if silent is False:
-        log.sh.setLevel(5)
-    else:
-        log.sh.setLevel(100)
-
-    if reject_multiple_per_fibre not in [True, False, "keep_brightest"]:
-        raise ValueError("Invalid value for reject_multiple_per_fibre.")
-
     hobject = pathlib.Path(hobject).absolute()
 
     if not hobject.exists():
         raise FileNotFoundError(f"{hobject} does not exist.")
+
+    log = get_logger(uuid.uuid4().hex[:8])
+
+    if silent is False:
+        log.sh.setLevel(logging.DEBUG)
+    else:
+        log.sh.setLevel(logging.ERROR)
+
+    if reject_multiple_per_fibre not in [True, False, "keep_brightest"]:
+        raise ValueError("Invalid value for reject_multiple_per_fibre.")
 
     if plot_dir is None:
         plot_dir = hobject.parent
     else:
         plot_dir = pathlib.Path(plot_dir).absolute()
 
+    # Use same plot_dir for log.
+    if write_log:
+        log.start_file_logger(
+            str(plot_dir / (hobject.stem + ".log")),
+            mode="w",
+            rotating=False,
+        )
+
     plot_stem = str(plot_dir / f"{hobject.stem}")
 
     log.info(f"Processing file {hobject!s}")
+    log.info(
+        f"{hobject.name}: using parameters gmag_limit: {gmag_limit}, "
+        f"nstar_limit: {nstar_limit}, max_sep: {max_sep}, "
+        f"reject_multiple_per_fibre: {reject_multiple_per_fibre}."
+    )
 
     hdul = fits.open(hobject)
 
@@ -246,7 +266,10 @@ def flux_calibration_self(
 
     exp_time = hdul[0].header["EXPTIME"]
 
-    log.info(f"Retrieving Gaia sources around ({bore_ra:.3f}, {bore_dec:.3f}) deg.")
+    log.info(
+        f"{hobject.name}: retrieving Gaia sources around "
+        f"({bore_ra:.3f}, {bore_dec:.3f}) deg."
+    )
 
     if connection is None:
         log.warning("No connection provided. Using default connection from sdssdb.")
@@ -260,10 +283,10 @@ def flux_calibration_self(
         gmag_limit=gmag_limit,
         limit=None,
     )
-    log.debug(f"{len(gaia_sources)} Gaia DR3 XP sources retrieved.")
+    log.debug(f"{hobject.name}: {len(gaia_sources)} Gaia DR3 XP sources retrieved.")
 
     log.debug(
-        "Rejecting stars with with separation to "
+        f"{hobject.name}: rejecting stars with with separation to "
         f"fibre centre < {max_sep:.1f} arcsec."
     )
 
@@ -302,11 +325,14 @@ def flux_calibration_self(
         # Keep all.
         pass
 
-    log.info(f"Number of Gaia sources within max_sep: {gaia_sources['valid'].sum()}")
+    log.info(
+        f"{hobject.name}: number of Gaia sources within max_sep: "
+        f"{gaia_sources['valid'].sum()}"
+    )
 
     gaia_valid = gaia_sources.filter(polars.col.valid)
     if nstar_limit is not None and gaia_valid.height > nstar_limit:
-        log.info(f"Selecting top {nstar_limit} sources.")
+        log.info(f"{hobject.name}: selecting top {nstar_limit} sources.")
         gaia_valid = gaia_valid.sort("phot_g_mean_mag").head(nstar_limit)
         gaia_sources = gaia_sources.with_columns(
             valid=polars.col.index.is_in(gaia_valid["index"])
@@ -369,6 +395,7 @@ def flux_calibration_self(
         channel,
         wave,
         hobject,
+        log,
         plot=plot,
         plot_stem=plot_stem,
     )
@@ -381,6 +408,7 @@ def _post_process_flux_calibration_df(
     channel: str,
     wave: numpy.ndarray,
     hobject: pathlib.Path,
+    log: SDSSLogger,
     plot: bool = False,
     plot_stem: str | None = None,
 ):
@@ -403,11 +431,14 @@ def _post_process_flux_calibration_df(
         assert plot_stem is not None, "plot_stem must be provided if plot is True."
 
     # Resample Gaia XP spectrum to the same wavelength as the science frame.
-    log.debug("Resampling Gaia XP spectra to the same wavelength as the science frame.")
+    log.debug(
+        f"{hobject.name}: resampling Gaia XP spectra to the "
+        "same wavelength as the science frame."
+    )
     df = _resample_gaia_xp(df, wave)
 
     # Retrieve sky corrections.
-    log.debug("Retrieving sky correction.")
+    log.debug(f"{hobject.name}: retrieving sky correction.")
     sky_corr = get_weighted_sky_corr(hobject)
 
     df = df.with_columns(
@@ -424,11 +455,11 @@ def _post_process_flux_calibration_df(
         sky_mask_z = get_z_continuum_mask(wave)
 
     # Get extinction correction.
-    log.debug("Getting extinction correction for LCO.")
+    log.debug(f"{hobject.name}: getting extinction correction for LCO.")
     ext = get_extinction_correction(wave)
 
     # Calculate the sensitivity function.
-    log.info("Calculating sensitivity function for each source.")
+    log.info(f"{hobject.name}: calculating sensitivity function for each source.")
 
     flux = df["flux"].to_numpy()
     sky_corr = df["sky_corr"].to_numpy()
@@ -490,7 +521,7 @@ def _post_process_flux_calibration_df(
     df = df.join(xp["fiberid", "sens", "sens_smooth"], on="fiberid", how="left")
 
     if plot:
-        log.info("Plotting sensitivity functions.")
+        log.info(f"{hobject.name}: plotting sensitivity functions.")
 
         # Plot the sensitivity function for each Gaia source.
         _plot_sensitivity_functions(
