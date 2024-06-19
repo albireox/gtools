@@ -55,7 +55,7 @@ XP_WAVE_SAMPLE = numpy.arange(3360.0, 10200.0 + 20.0, 20.0, dtype=numpy.float32)
 
 
 def get_gaiaxp(
-    connection: peewee.PostgresqlDatabase,
+    connection: peewee.PostgresqlDatabase | str,
     source_id: int,
     extra_info: bool = True,
     gaia_dr3_source_table: str = "catalogdb.gaia_dr3_source",
@@ -67,7 +67,7 @@ def get_gaiaxp(
     ----------
     connection
         The database connection. Usually an ``sdssdb`` connection to the
-        ``sdss5db`` database in ``operations``.
+        ``sdss5db`` database in ``operations``. Can also be a connection string.
     source_id
         The Gaia DR3 source ID.
     extra_info
@@ -106,7 +106,10 @@ def get_gaiaxp(
             WHERE source_id = {source_id}
         """
 
-    df = polars.read_database(query, connection)
+    if isinstance(connection, str):
+        df = polars.read_database_uri(query, connection, engine="adbc")
+    else:
+        df = polars.read_database(query, connection)
 
     if len(df) == 0:
         return None
@@ -138,7 +141,7 @@ def get_gaiaxp(
 
 
 def get_gaiaxp_cone(
-    connection: peewee.PostgresqlDatabase,
+    connection: peewee.PostgresqlDatabase | str,
     ra: float,
     dec: float,
     radius: float,
@@ -154,7 +157,7 @@ def get_gaiaxp_cone(
     ----------
     connection
         The database connection. Usually an ``sdssdb`` connection to the
-        ``sdss5db`` database in ``operations``.
+        ``sdss5db`` database in ``operations``. Can also be a connection string.
     ra, dec
         The coordinates of the centre of the cone.
     radius
@@ -204,7 +207,10 @@ def get_gaiaxp_cone(
     if limit is not None:
         query += f" ORDER BY g3.phot_g_mean_mag LIMIT {limit}"
 
-    df = polars.read_database(query, connection)
+    if isinstance(connection, str):
+        df = polars.read_database_uri(query, connection, engine="adbc")
+    else:
+        df = polars.read_database(query, connection)
 
     # Cast flux and error to array of floats.
     df = df.with_columns(

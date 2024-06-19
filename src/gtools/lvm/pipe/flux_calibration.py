@@ -159,7 +159,7 @@ def flux_calibration(
 
 def flux_calibration_self(
     hobject: PathType,
-    connection: peewee.PostgresqlDatabase | None = None,
+    connection: peewee.PostgresqlDatabase | str | None = None,
     gmag_limit: float | None = None,
     nstar_limit: int | None = None,
     max_sep: float = 7.0,
@@ -179,7 +179,8 @@ def flux_calibration_self(
         has been applied to the data (the ``lvmFFrame`` file).
     connection
         The database connection to ``sdss5db`` used to retrieve the Gaia sources.
-        If ``None``, uses the default connection from ``sdssdb``.
+        If ``None``, uses the default connection from ``sdssdb``. Can also be a
+        connection string in the form ``postgres://user:password@host:port/database``.
     gmag_limit
         The limit in G magnitude for the Gaia sources. If ``None``, no limit is applied.
     nstar_limit
