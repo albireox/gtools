@@ -428,31 +428,65 @@ def _post_process_flux_calibration_df(
 
     # Calculate the sensitivity function.
     log.info("Calculating sensitivity function for each source.")
-    sens = map(
-        lambda row: _calc_sensitivity_udf(
-            row,
+
+    flux = df["flux"].to_numpy()
+    sky_corr = df["sky_corr"].to_numpy()
+
+    # Remove sky and divide by exposure time.
+    flux_skycorr = (flux - sky_corr) / df["exp_time"].to_numpy()[numpy.newaxis, :].T
+
+    # Interpolate around bright sky lines. This needs to be done for each rows.
+    iterpolate_mask_vect = numpy.vectorize(
+        interpolate_mask,
+        signature="(n)->(n)",
+        excluded=[0, "mask", "fill_value"],
+    )
+
+    flux_skycorr = iterpolate_mask_vect(
+        wave,
+        flux_skycorr,
+        mask=sky_mask,
+        fill_value="extrapolate",
+    )
+
+    if channel == "z" and sky_mask_z is not None:
+        # The z mask is a positive one, so we negate it to get the regions
+        # to interpolate over.
+        flux_skycorr = iterpolate_mask_vect(
             wave,
-            ext,
-            channel,
-            sky_mask=sky_mask,
-            sky_mask_z=sky_mask_z,
-            secz=row["secz"],
-            exp_time=row["exp_time"],
-        ),
-        df.to_dicts(),
-    )
+            flux_skycorr,
+            mask=sky_mask,
+            fill_value="extrapolate",
+        )
 
+    # Apply the extinction correction.
+    secz = df["secz"].to_numpy()[numpy.newaxis, :].T
+    flux_corrected = (flux_skycorr) * 10 ** (0.4 * ext * secz)
+
+    # Save this flux as "flux_corrected".
     ARRAY_TYPE = polars.Array(polars.Float32, wave.size)
-    sens_df = polars.DataFrame(
-        sens,
-        schema={
-            "flux_corrected": ARRAY_TYPE,
-            "sens": ARRAY_TYPE,
-            "sens_smooth": ARRAY_TYPE,
-        },
+    df = df.with_columns(flux_corrected=polars.Series(flux_corrected, dtype=ARRAY_TYPE))
+
+    # Now filter only fibres with XP associations.
+    xp = df.filter(polars.col.flux_xp_resampled.is_not_null())
+
+    # Calculate the sensitivity function.
+    sens = xp["flux_xp_resampled"].to_numpy() / xp["flux_corrected"].to_numpy()
+
+    # Iterate over each row and create a smoothed sensitivity function.
+    # TODO: optimise this, but it's only a small number of rows.
+    sens_smooth = numpy.zeros_like(sens)
+
+    for ii, row in enumerate(sens):
+        wgood, sgood = filter_channel(wave, row, 2)
+        sens_smooth[ii] = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)(wave)
+
+    xp = xp.with_columns(
+        sens=polars.Series(sens, dtype=ARRAY_TYPE),
+        sens_smooth=polars.Series(sens_smooth, dtype=ARRAY_TYPE),
     )
 
-    df = df.with_columns(sens_df)
+    df = df.join(xp["fiberid", "sens", "sens_smooth"], on="fiberid", how="left")
 
     if plot:
         log.info("Plotting sensitivity functions.")
