@@ -38,6 +38,10 @@ __all__ = [
     "mean_absolute_deviation",
     "butter_lowpass_filter",
     "filter_channel",
+    "fframe_to_hobject",
+    "get_sky_mask_uves",
+    "get_z_continuum_mask",
+    "interpolate_mask",
 ]
 
 PathType = os.PathLike | str | pathlib.Path
@@ -384,7 +388,7 @@ def slitmap_radec_to_xy(
     return numpy.atleast_2d(interp(ra, dec))
 
 
-def get_extinction_correction(wave: ARRAY_1D) -> ARRAY_2D:
+def get_extinction_correction(wave: ARRAY_1D) -> ARRAY_1D:
     """Returns the extinction correction at LCO for the given wavelengths."""
 
     LVMCORE_DIR = os.getenv("LVMCORE_DIR")
@@ -607,3 +611,76 @@ def interpolate_mask(
     yy[missing_idx] = f(missing_x)
 
     return yy
+
+
+def fframe_to_hobject(fframe: PathType, outfile: PathType):
+    """Converts an ``lvmFFrame`` file to ``lvm-object`` by undoing flux calibration."""
+
+    fframe = pathlib.Path(fframe)
+    outfile = pathlib.Path(outfile)
+
+    if not fframe.exists():
+        raise FileNotFoundError(f"FFrame file {fframe} not found.")
+
+    hdul = fits.open(fframe)
+
+    flux = hdul["FLUX"].data
+    header = hdul[0].header
+
+    header["FLUXCAL"] = False
+
+    wave = get_wavelength_array_from_header(hdul[1].header)
+
+    secz = header["TESCIAM"]
+
+    slitmap = hdul["SLITMAP"].data
+
+    fluxcal = hdul["FLUXCAL"].data
+    t_fluxcal = Table(fluxcal)
+
+    exptimes = numpy.ones(len(slitmap)) * header["EXPTIME"]
+    for std_hd in t_fluxcal.colnames:
+        if std_hd in ["mean", "rms"]:
+            continue
+
+        exptime = header[f"{std_hd[:-3]}EXP"]
+        fiberid = header[f"{std_hd[:-3]}FIB"]
+
+        if fiberid is None:
+            continue
+
+        exptimes[slitmap["orig_ifulabel"] == fiberid] = exptime
+
+    exptimes = numpy.atleast_2d(exptimes).T
+
+    ext = get_extinction_correction(wave)
+
+    fluxcorr_factor = exptimes / 10 ** (0.4 * ext * secz) / fluxcal["mean"]
+
+    flux *= fluxcorr_factor
+    hdul["SKY_EAST"].data *= fluxcorr_factor
+    hdul["SKY_WEST"].data *= fluxcorr_factor
+
+    flux[hdul["MASK"].data > 0] = numpy.nan
+    flux[~numpy.isfinite(flux)] = numpy.nan
+
+    t_fluxcal.remove_columns(["mean", "rms"])
+
+    header["CDELT1"] = hdul[1].header["CDELT1"]
+    header["CRVAL1"] = hdul[1].header["CRVAL1"]
+    header["CUNIT1"] = hdul[1].header["CUNIT1"]
+    header["CTYPE1"] = hdul[1].header["CTYPE1"]
+    header["CRPIX1"] = hdul[1].header["CRPIX1"]
+
+    new_hdul = fits.HDUList(
+        [
+            fits.PrimaryHDU(data=flux, header=header),
+            hdul["MASK"],
+            hdul["SKY_EAST"],
+            hdul["SKY_WEST"],
+            fits.BinTableHDU(t_fluxcal, name="FLUXCAL"),
+            hdul["SLITMAP"],
+        ]
+    )
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    new_hdul.writeto(outfile, overwrite=True)
