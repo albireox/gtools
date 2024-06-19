@@ -838,9 +838,18 @@ def get_weighted_sky_corr(
         else:
             weights = (0.5, 0.5)
 
-    sky_corr = hdul["SKY_EAST"].data * weights[0] + hdul["SKY_WEST"].data * weights[1]
+    data_east = hdul["SKY_EAST"].data
+    data_west = hdul["SKY_WEST"].data
 
-    return sky_corr.astype(numpy.float64)
+    mask_east = ~numpy.isfinite(data_east)
+    mask_west = ~numpy.isfinite(data_west)
+
+    sky_east_masked = numpy.ma.masked_array(data_east, mask=mask_east)
+    sky_west_masked = numpy.ma.masked_array(data_west, mask=mask_west)
+
+    sky_corr = weights[0] * sky_east_masked + weights[1] * sky_west_masked
+
+    return sky_corr.filled(numpy.nan).astype(numpy.float32)
 
 
 def get_mean_sensitivity_response(df: polars.DataFrame, use_smooth: bool = True):
