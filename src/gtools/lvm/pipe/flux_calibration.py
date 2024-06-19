@@ -627,7 +627,15 @@ def _plot_sensitivity_functions(
                 if nn == 0:
                     ax.set_title(title)
 
-                ax.set_ylim(min([-0.2, flux_xp.min() * 0.7]), flux_xp.max() * 1.2)
+                flux_corrected_sclip = sigma_clip(
+                    flux_corrected[numpy.isfinite(flux_corrected)],
+                    sigma=3,
+                    masked=True,
+                )
+                ax.set_ylim(
+                    numpy.nanmin(flux_corrected_sclip) * 0.8,
+                    numpy.nanmax(flux_corrected_sclip) * 1.1,
+                )
 
                 ax.set_ylabel("Normalised flux")
                 ax2.set_ylabel("Sensitivity response (XP / corrected flux)")
