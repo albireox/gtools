@@ -331,7 +331,11 @@ def slitmap_to_polars(
     if isinstance(slitmap, polars.DataFrame):
         return slitmap
     elif isinstance(slitmap, fits.fitsrec.FITS_rec):
-        return polars.DataFrame(slitmap.tolist(), schema=slitmap.columns.names)  # type: ignore
+        return polars.DataFrame(
+            slitmap.tolist(),  # type: ignore
+            schema=slitmap.columns.names,  # type: ignore
+            orient="row",
+        )
     elif isinstance(slitmap, numpy.ndarray):
         return polars.from_numpy(slitmap)
     elif isinstance(slitmap, Table):

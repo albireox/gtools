@@ -128,7 +128,7 @@ def flux_calibration(
     standards = standards.rename({"ra": "ra_std", "dec": "dec_std"})
 
     df = std_map.join(standards, left_on="orig_ifulabel", right_on="fibre")
-    df = df.insert_at_idx(1, polars.Series("fiber_idx", df["fiberid"] - 1))
+    df = df.insert_column(1, polars.Series("fiber_idx", df["fiberid"] - 1))
 
     flux = data[df["fiber_idx"], :]
 
@@ -357,7 +357,7 @@ def flux_calibration_self(
 
     # Create a dataframe of fibre fluxes.
     df = slitmap_sci.clone()
-    df = df.insert_at_idx(1, polars.Series("fiber_idx", df["fiberid"] - 1))
+    df = df.insert_column(1, polars.Series("fiber_idx", df["fiberid"] - 1))
 
     df = df.with_columns(
         flux=polars.Series(
