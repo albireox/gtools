@@ -22,7 +22,7 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
-from scipy import signal
+from scipy import interpolate, signal
 from scipy.integrate import simps
 from scipy.interpolate import LinearNDInterpolator, interp1d
 
@@ -42,6 +42,7 @@ __all__ = [
     "get_sky_mask_uves",
     "get_z_continuum_mask",
     "interpolate_mask",
+    "smooth_2d",
 ]
 
 PathType = os.PathLike | str | pathlib.Path
@@ -192,6 +193,8 @@ def get_gaiaxp_cone(
             FROM {gaia_dr3_xp_table} AS xp
             JOIN {gaia_dr3_source_table} AS g3 ON xp.source_id = g3.source_id
             WHERE q3c_radial_query(xp.ra, xp.dec, {ra}, {dec}, {radius})
+                AND phot_bp_mean_mag-phot_rp_mean_mag < 1
+                AND phot_bp_mean_mag-phot_rp_mean_mag > 0.2
         """
     else:
         query = f"""
@@ -641,7 +644,9 @@ def fframe_to_hobject(fframe: PathType, outfile: PathType):
 
     wave = get_wavelength_array_from_header(hdul[1].header)
 
-    secz = header["TESCIAM"]
+    secz_sci = header["TESCIAM"]
+    secz_skye = header["TESKYEAM"]
+    secz_skyw = header["TESKYWAM"]
 
     slitmap = hdul["SLITMAP"].data
 
@@ -665,11 +670,9 @@ def fframe_to_hobject(fframe: PathType, outfile: PathType):
 
     ext = get_extinction_correction(wave)
 
-    fluxcorr_factor = exptimes / 10 ** (0.4 * ext * secz) / fluxcal["mean"]
-
-    flux *= fluxcorr_factor
-    hdul["SKY_EAST"].data *= fluxcorr_factor
-    hdul["SKY_WEST"].data *= fluxcorr_factor
+    flux *= exptimes / 10 ** (0.4 * ext * secz_sci) / fluxcal["mean"]
+    hdul["SKY_EAST"].data *= exptimes / 10 ** (0.4 * ext * secz_skye) / fluxcal["mean"]
+    hdul["SKY_WEST"].data *= exptimes / 10 ** (0.4 * ext * secz_skyw) / fluxcal["mean"]
 
     flux[hdul["MASK"].data > 0] = numpy.nan
     flux[~numpy.isfinite(flux)] = numpy.nan
@@ -694,3 +697,22 @@ def fframe_to_hobject(fframe: PathType, outfile: PathType):
     )
     outfile.parent.mkdir(parents=True, exist_ok=True)
     new_hdul.writeto(outfile, overwrite=True)
+
+
+def smooth_2d(wave: ARRAY_1D, array: ARRAY_2D) -> ARRAY_2D:
+    """Smooth a 2D array."""
+
+    smooth_array = numpy.zeros_like(array)
+
+    for ii, row in enumerate(array):
+        try:
+            wgood, sgood = filter_channel(wave, row, 2)
+            smooth_func = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)
+            smooth_array[ii] = smooth_func(wave)
+
+        except ValueError:
+            # Deal with The length of the input vector x must be greater than
+            # padlen, which is 15, error.
+            smooth_array[ii] = numpy.nan
+
+    return smooth_array

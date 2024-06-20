@@ -25,13 +25,11 @@ from astropy.io import fits
 from astropy.stats import biweight_location, biweight_scale, sigma_clip
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from scipy import interpolate
 
 from sdsstools.logger import SDSSLogger, get_logger
 
 from gtools.lvm.pipe.tools import (
     calculate_secz,
-    filter_channel,
     get_extinction_correction,
     get_gaiaxp,
     get_gaiaxp_cone,
@@ -42,6 +40,7 @@ from gtools.lvm.pipe.tools import (
     interpolate_mask,
     slitmap_radec_to_xy,
     slitmap_to_polars,
+    smooth_2d,
 )
 from gtools.lvm.plotting import plot_rss
 
@@ -165,7 +164,8 @@ def flux_calibration_self(
     gmag_limit: float | None = None,
     nstar_limit: int | None = None,
     max_sep: float = 7.0,
-    reject_multiple_per_fibre: bool | Literal["keep_brightest"] = True,
+    reject_multiple_per_fibre: bool | Literal["keep_brightest", "keep_hottest"] = True,
+    smooth_flux: bool = False,
     silent: bool = False,
     plot: bool = False,
     plot_dir: PathType | None = None,
@@ -195,7 +195,12 @@ def flux_calibration_self(
     reject_multiple_per_fibre
         If ``True``, rejects all stars that fall on the same fibre as another star.
         ``False`` will consider all the stars valid. If ``keep_brightest``, fibres with
-        more than one star will keep the brightest one in the G band.
+        more than one star will keep the brightest one in the G band. If
+        ``keep_hottest`` will keep the stars with the highest ``teff_gspphot``.
+    smooth_flux
+        If ``True``, the corrected LVM flux is smoothed before calculating the
+        sensitivity function. Otherwise the sensitivity function is calculated
+        from the unsmoothed flux and then the sensitivity function is smoothed.
     silent
         If ``True``, does not print any output.
     plot
@@ -226,8 +231,9 @@ def flux_calibration_self(
     else:
         log.sh.setLevel(logging.ERROR)
 
-    if reject_multiple_per_fibre not in [True, False, "keep_brightest"]:
-        raise ValueError("Invalid value for reject_multiple_per_fibre.")
+    if isinstance(reject_multiple_per_fibre, str):
+        if reject_multiple_per_fibre not in ["keep_brightest", "keep_hottest"]:
+            raise ValueError("Invalid value for reject_multiple_per_fibre.")
 
     if plot_dir is None:
         plot_dir = hobject.parent
@@ -241,6 +247,13 @@ def flux_calibration_self(
             mode="w",
             rotating=False,
         )
+
+    sort_col: str = "phot_g_mean_mag"
+    sort_descending: bool = False
+    if isinstance(reject_multiple_per_fibre, str):
+        if reject_multiple_per_fibre == "keep_hottest":
+            sort_col = "teff_gspphot"
+            sort_descending = True
 
     plot_stem = str(plot_dir / f"{hobject.stem}")
 
@@ -283,6 +296,8 @@ def flux_calibration_self(
         gmag_limit=gmag_limit,
         limit=None,
     )
+    gaia_sources = gaia_sources.drop("flux_error_xp")
+
     log.debug(f"{hobject.name}: {len(gaia_sources)} Gaia DR3 XP sources retrieved.")
 
     log.debug(
@@ -310,12 +325,18 @@ def flux_calibration_self(
         # Reject all stars that have a duplicate fibre.
         gaia_sources_dup = gaia_sources["fiberid"].is_duplicated()
         gaia_sources[gaia_sources_dup.arg_true(), "valid"] = False
-    elif reject_multiple_per_fibre == "keep_brightest":
+    elif isinstance(reject_multiple_per_fibre, str):
         # Keep the brightest star in the G band.
         valid_gaia = (
             gaia_sources.filter(polars.col.valid)
             .group_by("fiberid")
-            .agg(polars.col.source_id.top_k_by("phot_g_mean_mag", k=1))
+            .agg(
+                polars.col.source_id.top_k_by(
+                    by=sort_col,
+                    reverse=sort_descending,
+                    k=1,
+                )
+            )
             .explode("source_id")
         )
         gaia_sources = gaia_sources.with_columns(
@@ -333,7 +354,10 @@ def flux_calibration_self(
     gaia_valid = gaia_sources.filter(polars.col.valid)
     if nstar_limit is not None and gaia_valid.height > nstar_limit:
         log.info(f"{hobject.name}: selecting top {nstar_limit} sources.")
-        gaia_valid = gaia_valid.sort("phot_g_mean_mag").head(nstar_limit)
+        gaia_valid = gaia_valid.sort(
+            by=sort_col,
+            descending=sort_descending,
+        ).head(nstar_limit)
         gaia_sources = gaia_sources.with_columns(
             valid=polars.col.index.is_in(gaia_valid["index"])
         )
@@ -396,6 +420,7 @@ def flux_calibration_self(
         wave,
         hobject,
         log,
+        smooth_flux=smooth_flux,
         plot=plot,
         plot_stem=plot_stem,
     )
@@ -411,6 +436,7 @@ def _post_process_flux_calibration_df(
     log: SDSSLogger,
     plot: bool = False,
     plot_stem: str | None = None,
+    smooth_flux: bool = False,
 ):
     """Helper function common to ``flux_calibration`` and ``flux_calibration_self``.
 
@@ -468,13 +494,13 @@ def _post_process_flux_calibration_df(
     flux_skycorr = (flux - sky_corr) / df["exp_time"].to_numpy()[numpy.newaxis, :].T
 
     # Interpolate around bright sky lines. This needs to be done for each rows.
-    iterpolate_mask_vect = numpy.vectorize(
+    interpolate_mask_vect = numpy.vectorize(
         interpolate_mask,
         signature="(n)->(n)",
         excluded=[0, "mask", "fill_value"],
     )
 
-    flux_skycorr = iterpolate_mask_vect(
+    flux_skycorr = interpolate_mask_vect(
         wave,
         flux_skycorr,
         mask=sky_mask,
@@ -484,7 +510,7 @@ def _post_process_flux_calibration_df(
     if channel == "z" and sky_mask_z is not None:
         # The z mask is a positive one, so we negate it to get the regions
         # to interpolate over.
-        flux_skycorr = iterpolate_mask_vect(
+        flux_skycorr = interpolate_mask_vect(
             wave,
             flux_skycorr,
             mask=sky_mask,
@@ -503,22 +529,37 @@ def _post_process_flux_calibration_df(
     xp = df.filter(polars.col.flux_xp_resampled.is_not_null())
 
     # Calculate the sensitivity function.
-    sens = xp["flux_xp_resampled"].to_numpy() / xp["flux_corrected"].to_numpy()
+    flux_corrected = xp["flux_corrected"].to_numpy()
 
-    # Iterate over each row and create a smoothed sensitivity function.
+    sens = sens_smooth = flux_smooth = None
+
     # TODO: optimise this, but it's only a small number of rows.
-    sens_smooth = numpy.zeros_like(sens)
+    if smooth_flux:
+        flux_smooth = smooth_2d(wave, flux_corrected)
+        sens_smooth = xp["flux_xp_resampled"].to_numpy() / flux_smooth
+        sens = sens_smooth
+    else:
+        sens = xp["flux_xp_resampled"].to_numpy() / flux_corrected
+        sens_smooth = smooth_2d(wave, sens)
 
-    for ii, row in enumerate(sens):
-        wgood, sgood = filter_channel(wave, row, 2)
-        sens_smooth[ii] = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)(wave)
+    if smooth_flux:
+        xp = xp.with_columns(
+            flux_smooth=polars.Series(flux_smooth, dtype=ARRAY_TYPE),
+            sens=polars.Series(sens, dtype=ARRAY_TYPE),
+            sens_smooth=polars.Series(sens_smooth, dtype=ARRAY_TYPE),
+        )
+    else:
+        xp = xp.with_columns(
+            flux_smooth=polars.lit(flux_smooth, dtype=ARRAY_TYPE),
+            sens=polars.lit(sens, dtype=ARRAY_TYPE),
+            sens_smooth=polars.Series(sens_smooth, dtype=ARRAY_TYPE),
+        )
 
-    xp = xp.with_columns(
-        sens=polars.Series(sens, dtype=ARRAY_TYPE),
-        sens_smooth=polars.Series(sens_smooth, dtype=ARRAY_TYPE),
+    df = df.join(
+        xp["fiberid", "flux_smooth", "sens", "sens_smooth"],
+        on="fiberid",
+        how="left",
     )
-
-    df = df.join(xp["fiberid", "sens", "sens_smooth"], on="fiberid", how="left")
 
     if plot:
         log.info(f"{hobject.name}: plotting sensitivity functions.")
@@ -613,10 +654,24 @@ def _plot_sensitivity_functions(
                 ra = row["ra_gaia"]
                 dec = row["dec_gaia"]
 
-                flux_corrected = numpy.array(row["flux_corrected"], dtype=numpy.float32)
+                if row["flux_smooth"] is None:
+                    flux_corrected = numpy.array(
+                        row["flux_corrected"],
+                        dtype=numpy.float32,
+                    )
+                else:
+                    flux_corrected = numpy.array(
+                        row["flux_smooth"],
+                        dtype=numpy.float32,
+                    )
+
                 flux_xp = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
 
                 sens_smooth = numpy.array(row["sens_smooth"])
+
+                # Reject all NaNs
+                if not numpy.any(numpy.isfinite(flux_corrected)):
+                    continue
 
                 flux_corrected /= numpy.nanmedian(flux_corrected[500:-500])
                 flux_xp /= numpy.nanmedian(flux_xp)
@@ -786,60 +841,6 @@ def _interp_gaia_xp_udf(
         return None
 
     return polars.Series(numpy.interp(wave, xp_wave, xp_flux))
-
-
-def _calc_sensitivity_udf(
-    row: dict,
-    wave: numpy.ndarray,
-    ext: numpy.ndarray,
-    channel: str,
-    sky_mask: numpy.ndarray | None = None,
-    sky_mask_z: numpy.ndarray | None = None,
-    secz: float = 1.0,
-    exp_time: float = 900.0,
-) -> dict:
-    """Calculates the sensitivity function for a given source."""
-
-    flux = numpy.array(row["flux"], dtype=numpy.float32)
-    sky_corr = numpy.array(row["sky_corr"], dtype=numpy.float32)
-
-    flux_skycorr = (flux - sky_corr) / exp_time
-
-    if sky_mask is not None:
-        flux_skycorr = interpolate_mask(
-            wave,
-            flux_skycorr,
-            sky_mask,
-            fill_value="extrapolate",
-        )
-
-    if channel == "z" and sky_mask_z is not None:
-        # The z mask is a positive one, so we negate it to get the regions
-        # to interpolate over.
-        flux_skycorr = interpolate_mask(
-            wave,
-            flux_skycorr,
-            ~sky_mask_z,
-            fill_value="extrapolate",
-        )
-
-    flux_corrected = (flux_skycorr) * 10 ** (0.4 * ext * secz)
-
-    if row["flux_xp_resampled"] is None:
-        return {"flux_corrected": flux_corrected.tolist()}
-
-    flux_xp_resampled = numpy.array(row["flux_xp_resampled"], dtype=numpy.float32)
-
-    sens = flux_xp_resampled / flux_corrected
-
-    wgood, sgood = filter_channel(wave, sens, 2)
-    sens_smooth = interpolate.make_smoothing_spline(wgood, sgood, lam=1e4)
-
-    return {
-        "flux_corrected": flux_corrected.tolist(),
-        "sens": sens.tolist(),
-        "sens_smooth": sens_smooth(wave).tolist(),
-    }
 
 
 def get_weighted_sky_corr(
