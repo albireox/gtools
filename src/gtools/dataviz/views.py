@@ -40,7 +40,6 @@ def create_sdss_id_to_catalog_view(
         "SELECT * FROM pg_matviews WHERE matviewname = 'sdss_id_to_catalog';"
     )
     view_exists = view_query.fetchone() is not None
-    print(view_exists)
 
     if view_exists:
         if drop_existing:
@@ -70,7 +69,7 @@ def create_sdss_id_to_catalog_view(
             ON sdss_id_flat.catalogid = catalog.catalogid
     """
 
-    for c2table in catalog_to_tables:
+    for c2table in sorted(catalog_to_tables):
         table = c2table.replace("catalog_to_", "")
 
         if c2table in ["catalog_to_sdss_dr13_photoobj"]:
@@ -92,8 +91,25 @@ def create_sdss_id_to_catalog_view(
 
         pk = pks[0]
         alias = f"{table}__{pk}"
-        select_columns_list.append(f"catalogdb.{table}.{pk} AS {alias}")
         aliases.append(alias)
+
+        # Gaia DR2 and 2MASS PSC are a special case because in v0.1 and v0.5 we
+        # did not explicitely cross-match them as they were complete in TIC v8. But
+        # in v1 we are not using the TIC and we did cross-match them using Gaia DR3
+        # best neighbour tables. Here we need to include either one of the values
+        # (only one of them will be non-NULL) in the view.
+
+        if table == "gaia_dr2_source":
+            select_columns_list.append(
+                "COALESCE(catalogdb.gaia_dr2_source.source_id, "
+                f"catalogdb.tic_v8.gaia_int) AS {alias}"
+            )
+        elif table == "twomass_psc":
+            select_columns_list.append(
+                f"COALESCE(catalogdb.twomass_psc.pts_key, tm2.pts_key) AS {alias}"
+            )
+        else:
+            select_columns_list.append(f"catalogdb.{table}.{pk} AS {alias}")
 
         query += f"""
         LEFT JOIN catalogdb.{c2table}
@@ -102,6 +118,16 @@ def create_sdss_id_to_catalog_view(
             AND {c2table}.version_id = catalog.version_id
         LEFT JOIN catalogdb.{table}
             ON catalogdb.{c2table}.target_id = catalogdb.{table}.{pk}
+        """
+
+        if table == "twomass_psc":
+            # catalog_to_tic_v8 has already been added (its alphabetically before
+            # catalog_to_twomass_psc) so we only add the extra join here. We need to
+            # use an alias since there is already a direct join
+            # from catalog_to_twomass_psc to twomass_psc.
+            query += """
+        LEFT JOIN catalogdb.twomass_psc AS tm2
+            ON catalogdb.tic_v8.twomass_psc = tm2.designation
         """
 
     select_columns: str = ""
