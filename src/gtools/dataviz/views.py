@@ -63,6 +63,7 @@ def create_sdss_id_to_catalog_view(
            catalogdb.sdss_id_flat.sdss_id,
            catalogdb.catalog.catalogid,
            catalogdb.catalog.version_id,
+           catalogdb.catalog.lead,
 {select_columns}
         FROM catalogdb.sdss_id_flat
         JOIN catalogdb.catalog
