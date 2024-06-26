@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 
 def create_sdss_id_to_catalog_view(
+    view_name: str = "sdss_id_to_catalog",
+    schema: str = "catalogdb",
     drop_existing: bool = False,
     local: bool = False,
     show_query=False,
@@ -37,18 +39,18 @@ def create_sdss_id_to_catalog_view(
     assert database.connected, "Database not connected."
 
     view_query = database.execute_sql(
-        "SELECT * FROM pg_matviews WHERE matviewname = 'sdss_id_to_catalog';"
+        f"SELECT * FROM pg_matviews WHERE matviewname = '{view_name}';"
     )
     view_exists = view_query.fetchone() is not None
 
     if view_exists:
         if drop_existing:
-            log.warning('Droping existing view "sdss_id_to_catalog"')
+            log.warning(f'Droping existing view "{view_name}"')
             database.execute_sql(
-                "DROP MATERIALIZED VIEW IF EXISTS catalogdb.sdss_id_to_catalog;"
+                f"DROP MATERIALIZED VIEW IF EXISTS catalogdb.{view_name};"
             )
         else:
-            raise ValueError('View "sdss_id_to_catalog" already exists.')
+            raise ValueError(f'View "{view_name}" already exists.')
 
     # We build the query manually so that the resulting query is easy to read in
     # the materialized view.
@@ -58,7 +60,7 @@ def create_sdss_id_to_catalog_view(
     select_columns_list: list[str] = []
     aliases: list[str] = []
     query = """
-    CREATE MATERIALIZED VIEW catalogdb.sdss_id_to_catalog TABLESPACE pg_default AS
+    CREATE MATERIALIZED VIEW {schema}.{view_name} TABLESPACE pg_default AS
     SELECT row_number() OVER () as pk,
            catalogdb.sdss_id_flat.sdss_id,
            catalogdb.catalog.catalogid,
@@ -136,7 +138,13 @@ def create_sdss_id_to_catalog_view(
         comma = "," if column != select_columns_list[-1] else ""
         select_columns += f"           {column}{comma}\n"
 
-    query = textwrap.dedent(query.format(select_columns=select_columns))
+    query = textwrap.dedent(
+        query.format(
+            select_columns=select_columns,
+            schema=schema,
+            view_name=view_name,
+        )
+    )
 
     if show_query:
         log.info("The following query will be run:")
