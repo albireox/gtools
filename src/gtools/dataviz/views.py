@@ -79,14 +79,17 @@ def create_sdss_id_to_catalog_view(
             continue
         if table in ["skies_v1", "skies_v2"]:
             continue
-        if not database.table_exists(table, schema="catalogdb"):
-            continue
 
         pks = database.get_primary_keys(table, schema="catalogdb")
 
         if c2table == "catalog_to_sdss_dr13_photoobj_primary":
             table = "sdss_dr13_photoobj"
             pks = ["objid"]
+        elif table.startswith("catwise"):
+            pks = ["source_id"]
+
+        if not database.table_exists(table, schema="catalogdb"):
+            continue
 
         if len(pks) != 1:
             log.warning(f"Skipping table {table!r} with multiple primary keys.")
@@ -150,7 +153,7 @@ def create_sdss_id_to_catalog_view(
         log.info("The following query will be run:")
         log.info(query)
 
-    log.info("Creating view 'sdss_id_to_catalog' ...")
+    log.info(f"Creating view '{view_name}' ...")
 
     with Timer() as timer:
         with database.atomic():
@@ -168,15 +171,15 @@ def create_sdss_id_to_catalog_view(
 
     log.info("Creating indices ..")
 
-    database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (pk);")
-    database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (sdss_id);")
-    database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (catalogid);")
-    database.execute_sql("CREATE INDEX ON sdss_id_to_catalog (version_id);")
+    database.execute_sql(f"CREATE INDEX ON {view_name} (pk);")
+    database.execute_sql(f"CREATE INDEX ON {view_name} (sdss_id);")
+    database.execute_sql(f"CREATE INDEX ON {view_name} (catalogid);")
+    database.execute_sql(f"CREATE INDEX ON {view_name} (version_id);")
 
     for alias in aliases:
-        database.execute_sql(f"CREATE INDEX ON sdss_id_to_catalog ({alias});")
+        database.execute_sql(f"CREATE INDEX ON {view_name} ({alias});")
 
     log.info("Running VACUUM ANALYZE ...")
-    database.execute_sql("VACUUM ANALYZE sdss_id_to_catalog;")
+    database.execute_sql(f"VACUUM ANALYZE {view_name};")
 
     log.info("Done.")
