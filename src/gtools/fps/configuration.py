@@ -64,26 +64,25 @@ def read_all_configurations(
         summaries: list[polars.DataFrame] = []
         for file in files:
             try:
-                summary = polars.read_parquet(file, columns=columns)
+                summary = polars.read_parquet(file)
+                if columns is not None:
+                    valid_cols = [col for col in summary.columns if col in columns]
+                    summary = summary.select(*valid_cols)
+
+                # Some early APO configurations have invalid design_id. Those can
+                # be safely ignored.
+                if not summary["design_id"].dtype.is_integer():
+                    continue
+
                 summaries.append(summary)
             except Exception:
                 if not best_effort:
                     raise
 
-        last_schema = summaries[0].schema
-        cast_summaries: list[polars.DataFrame] = []
-        for summary in summaries:
-            try:
-                cast_summary = summary.cast(last_schema)  # type: ignore
-                cast_summaries.append(cast_summary)
-            except Exception:
-                if not best_effort:
-                    raise
-
-        if len(cast_summaries) == 0:
+        if len(summaries) == 0:
             continue
 
-        obs_data.append(polars.concat(cast_summaries))
+        obs_data.append(polars.concat(summaries, how="diagonal_relaxed"))
 
     data = polars.concat(obs_data)
     data = data.select(
