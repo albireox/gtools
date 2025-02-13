@@ -27,7 +27,15 @@ REQUIRED_COLS = [
     "positionerId",
     "fiberType",
 ]
-BOOLEAN_COLS = ["assigned", "on_target", "disabled", "valid", "decollided", "too"]
+BOOLEAN_COLS = [
+    "assigned",
+    "on_target",
+    "disabled",
+    "valid",
+    "decollided",
+    "too",
+    "is_dithered",
+]
 DISABLED_REQUIRED_COLS = REQUIRED_COLS + [
     "alpha",
     "beta",
