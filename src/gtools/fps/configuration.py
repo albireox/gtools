@@ -11,9 +11,12 @@ from __future__ import annotations
 import os
 import pathlib
 
-from typing import Literal, Sequence
+from typing import Literal, Sequence, overload
 
 import polars
+from rich.progress import track
+
+from gtools import log
 
 
 def read_all_configurations(
@@ -43,6 +46,8 @@ def read_all_configurations(
 
     """
 
+    console = log.rich_console
+
     if sdsscore is None:
         assert "SDSSCORE_DIR" in os.environ, "SDSSCORE_DIR not set."
         sdsscore_path = pathlib.Path(os.environ["SDSSCORE_DIR"])
@@ -62,7 +67,7 @@ def read_all_configurations(
 
         files = sorted(summary_path.glob(f"**/confSummary{flavour}*.parquet"))[::-1]
         summaries: list[polars.DataFrame] = []
-        for file in files:
+        for file in track(files, description=obs, transient=True, console=console):
             try:
                 summary = polars.read_parquet(file)
                 if columns is not None:
@@ -91,3 +96,107 @@ def read_all_configurations(
     )
 
     return data.sort(["observatory", "configuration_id", "positionerId"])
+
+
+@overload
+def disabled_robots(
+    data: pathlib.Path | str | polars.DataFrame,
+    return_count: Literal[False] = False,
+) -> polars.DataFrame: ...
+
+
+@overload
+def disabled_robots(
+    data: pathlib.Path | str | polars.DataFrame,
+    return_count: Literal[True] = True,
+) -> tuple[polars.DataFrame, polars.DataFrame]: ...
+
+
+def disabled_robots(
+    data: pathlib.Path | str | polars.DataFrame,
+    return_count: bool = False,
+) -> polars.DataFrame | tuple[polars.DataFrame, polars.DataFrame]:
+    """Returns a data frame of disabled robots per MJD and observatory.
+
+    Parameters
+    ----------
+    data
+        A concatenated data frame with all the confSummary file information or
+        the path to the file.
+    return_count
+        If :obj:`True`, returns a tuple with the data frame of disabled robots
+        per MJD and observatory, and a data frame with the number of MJDs a robot
+        was disabled.
+
+    """
+
+    if not isinstance(data, polars.DataFrame):
+        data = polars.read_parquet(data)
+
+    # Cast to proper boolean type.
+    d1 = data.cast(
+        {
+            "decollided": polars.Boolean,
+            "valid": polars.Boolean,
+            "too": polars.Boolean,
+            "assigned": polars.Boolean,
+            "on_target": polars.Boolean,
+        }
+    )
+
+    pcol = polars.col
+    over_c = ["MJD", "positionerId", "observatory"]
+    hypot = (pcol.alpha.std().pow(2) + pcol.beta.std().pow(2)).sqrt()
+
+    # Determine whether a robot was disabled for a given MJD and observatory.
+    # We use two metrics: either the robot was never on target for that MJD (even if
+    # it had assigned targets) or the standard deviation of the positioner coordinates
+    # is below 0.5 for the entire night, which means that it didn't move.
+    d2 = (
+        d1.select(
+            "MJD",
+            "positionerId",
+            "observatory",
+            "valid",
+            "on_target",
+            "assigned",
+            "alpha",
+            "beta",
+        )
+        .filter(pcol.assigned)
+        .with_columns(
+            alpha_median=pcol.alpha.median().over(over_c),
+            beta_median=pcol.beta.median().over(over_c),
+            none_on_target=(pcol.on_target.not_().all()).over(over_c),
+            positioner_std=(hypot).over(over_c),
+        )
+        .with_columns(disabled=(pcol.none_on_target | (pcol.positioner_std < 5)))
+    )
+
+    # Create a list of disabled robots per MJD and observatory.
+    d3 = d2.filter(pcol.disabled).select("observatory", "MJD", "positionerId").unique()
+
+    # Include the median alpha and beta values for each disabled robot, each MJD.
+    d4 = d3.join(
+        d2.select(
+            [
+                "MJD",
+                "observatory",
+                "positionerId",
+                "alpha_median",
+                "beta_median",
+            ]
+        ).unique(["MJD", "observatory", "positionerId"]),
+        on=["observatory", "MJD", "positionerId"],
+        how="inner",
+    )
+
+    d4 = d4.sort("observatory", "MJD", "positionerId")
+
+    # Include the median alpha and beta values for each disabled robot, each MJD.
+
+    if return_count:
+        count = d3.group_by("positionerId").count().sort("positionerId")
+        return d4, count
+
+    return d4
