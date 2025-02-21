@@ -28,7 +28,6 @@ def plot_wok(
     ax: Axes | None = None,
     highlight: list[str] = [],
     show_type: bool = False,
-    show_legend: bool | None = None,
     show_coordinates: bool = False,
 ) -> Axes:
     """Plots a representation of the wok."""

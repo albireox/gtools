@@ -11,8 +11,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import astropy.visualization
+import numpy.typing as npt
 
-from gtools.types import ARRAY_2D, INTERVAL_T, STRETCH_T
+from gtools.types import INTERVAL_T, STRETCH_T
 
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ __all__ = ["plot_with_stretch"]
 
 
 def plot_with_stretch(
-    data: ARRAY_2D,
+    data: npt.ArrayLike,
     interval: INTERVAL_T = "zscale",
     stretch: STRETCH_T = "linear",
     ax: Axes | None = None,

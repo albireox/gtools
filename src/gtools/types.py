@@ -8,15 +8,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 import astropy.visualization
-import nptyping as npt
 
-
-ARRAY_2D = npt.NDArray[npt.Shape["*, *"], Any]
-ARRAY_2D_f32 = npt.NDArray[npt.Shape["*, *"], npt.Float32]
-ARRAY_2D_u16 = npt.NDArray[npt.Shape["*, *"], npt.UInt16]
 
 INTERVAL_T = Literal["zscale", "minmax"] | tuple[float, float]
 STRETCH_T = Literal["linear", "log"] | astropy.visualization.BaseStretch
