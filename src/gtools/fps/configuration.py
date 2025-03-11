@@ -11,10 +11,10 @@ from __future__ import annotations
 import os
 import pathlib
 
-from typing import Literal, Sequence, overload
+from typing import Iterable, Literal, Sequence, TypeVar, overload
 
 import polars
-from rich.progress import track
+from rich.progress import track as rich_track
 
 from gtools import log
 
@@ -45,12 +45,20 @@ DISABLED_REQUIRED_COLS = REQUIRED_COLS + [
 ]
 
 
+T = TypeVar("T")
+
+
+def track_noop(iterable: Sequence[T] | Iterable[T], **kwargs) -> Iterable[T]:
+    yield from iterable
+
+
 def read_all_configurations(
     observatories: Sequence[str] = ["APO", "LCO"],
     sdsscore: str | pathlib.Path | None = None,
     best_effort: bool = True,
     columns: list[str] | None = None,
     flavour: Literal["S", "FS"] = "FS",
+    progress_bar: bool = True,
 ) -> polars.DataFrame:
     """Reads all the configurations and returns a concatenated dataframe.
 
@@ -69,10 +77,17 @@ def read_all_configurations(
     flavour
         The flavour of the configuration to read. Currently only ``S`` and ``FS``
         are supported.
+    progress_bar
+        Show a progress bar while reading the files.
 
     """
 
     console = log.rich_console
+
+    if progress_bar:
+        track = rich_track
+    else:
+        track = track_noop
 
     if sdsscore is None:
         assert "SDSSCORE_DIR" in os.environ, "SDSSCORE_DIR not set."
