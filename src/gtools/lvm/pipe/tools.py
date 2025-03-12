@@ -21,8 +21,8 @@ from astropy.io import fits
 
 __all__ = [
     "slice_to_2d_slice",
-    "cent_trace_to_dataframe",
-    "width_trace_to_dataframe",
+    "mtrace_to_dataframe",
+    "mwidth_to_dataframe",
     "read_fibermap",
 ]
 
@@ -54,31 +54,24 @@ def slice_to_2d_slice(
     return slice_
 
 
-def cent_trace_to_dataframe(
-    file_: pathlib.Path | str,
-    extension: str | int = "CENT_TRACE",
-):
-    """Converts a ``CENT_TRACE`` extension to a Polars data frame."""
+def mtrace_to_dataframe(file_: pathlib.Path | str, ccd: str):
+    """Converts an ``lvm-mtrace`` file to a Polars data frame."""
 
-    data = fits.open(file_)[extension].data
-    header = fits.getheader(file_, ext=0)
+    coeffs = fits.getdata(file_, ext=3)
 
-    ccd = header["CCD"]
-    nfibre = data.shape[0]
+    nfibre = coeffs.shape[0]
 
     df = polars.DataFrame(
         {
             "nfibre": polars.Series("nfibre", range(1, nfibre + 1), polars.Int32),
             "ccd": ccd,
-            "xmin": polars.Series("xmin", data["XMIN"].tolist(), polars.Int16),
-            "xmax": polars.Series("xmax", data["XMAX"].tolist(), polars.Int16),
             **{
                 f"coeff{i}": polars.Series(
                     f"coeff{i}",
-                    data["COEFF"][:, i].tolist(),
+                    coeffs[:, i].tolist(),
                     polars.Float32,
                 )
-                for i in range(data["COEFF"].shape[1])
+                for i in range(coeffs.shape[1])
             },
         }
     )
@@ -86,13 +79,10 @@ def cent_trace_to_dataframe(
     return df
 
 
-def width_trace_to_dataframe(
-    file_: pathlib.Path | str,
-    extension: str | int = "WIDTH_TRACE",
-):
-    """Converts a ``WIDTH_TRACE`` extension to a Polars data frame."""
+def mwidth_to_dataframe(file_: pathlib.Path | str, ccd: str):
+    """Converts an ``lvm-mwidth`` file to a Polars data frame."""
 
-    return cent_trace_to_dataframe(file_, extension=extension)
+    return mtrace_to_dataframe(file_, ccd)
 
 
 def read_fibermap(path: str | pathlib.Path | None = None) -> polars.DataFrame:

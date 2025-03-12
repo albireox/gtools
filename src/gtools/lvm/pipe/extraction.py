@@ -72,7 +72,7 @@ def quick_extraction(
     cent_trace = cent_trace.filter(polars.col.ccd == ccd)
     width_trace = width_trace.filter(polars.col.ccd == ccd)
 
-    xrange = numpy.arange(cent_trace[0, "xmin"], cent_trace[0, "xmax"] + 1)
+    xrange = numpy.arange(data.shape[1])
     extracted: npt.NDArray[numpy.float32] = numpy.empty(
         (len(cent_trace), len(xrange)),
         dtype=numpy.float32,
