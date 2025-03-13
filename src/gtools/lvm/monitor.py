@@ -17,7 +17,6 @@ from typing import Annotated
 import numpy
 import seaborn
 import typer
-from astropy.io import fits
 from matplotlib import pyplot as plt
 from watchdog.events import (
     FileCreatedEvent,
@@ -140,11 +139,6 @@ class SpecPatternEventHandler(PatternMatchingEventHandler):
 
             if not path.exists():
                 log.warning(f"Detected file {path!s} does not exist!")
-                return
-
-            image_type = fits.getval(str(path), "IMAGETYP")
-            if image_type != "object":
-                log.info(f"Detected file {path}. Not an object image, skipping.")
                 return
 
             frame_no = get_spec_frameno(path)
