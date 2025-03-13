@@ -22,6 +22,8 @@ dependencies = [
     "polars>=0.20.0",
     "sdssdb>=0",
     "healpy>=1.17.1",
+    "watchdog>=6.0.0",
+    "typer>=0.15.2",
 ]
 
 [project.scripts]
