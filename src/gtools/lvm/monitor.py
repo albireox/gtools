@@ -47,11 +47,11 @@ def process_files(files: list[pathlib.Path], outpath: pathlib.Path):
     log.debug("Running quick extraction with mode='sum'.")
     data_sum = extract_and_stitch(files, detrend=True, mode="sum")
 
-    log.debug("Running quick extraction with mode='cent'.")
-    data_cent = extract_and_stitch(files, detrend=True, mode="cent")
-
     log.debug("Creating IFU image.")
     plot_ifu_data(data_sum, filename=outpath / f"ifu-{exp_no:08d}.pdf")
+
+    log.debug("Running quick extraction with mode='cent'.")
+    data_cent = extract_and_stitch(files, detrend=True, mode="cent")
 
     log.debug("Plotting histogram data.")
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
