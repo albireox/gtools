@@ -61,7 +61,7 @@ def process_files(files: list[pathlib.Path], outpath: pathlib.Path):
     perc = 80
 
     count_global, bins_global = numpy.histogram(data_cent, bins)
-    axes[0, 0].hist(count_global, bins=bins_global, color="k")
+    axes[0, 0].hist(bins_global[:-1], bins_global, weights=count_global, color="k")
     axes[0, 0].set_xlabel("Counts")
     axes[0, 0].set_title("Full wavelength range")
 
@@ -69,7 +69,7 @@ def process_files(files: list[pathlib.Path], outpath: pathlib.Path):
     log.debug(f"Percentile {perc}% (global): {perc_global:.2f}.")
 
     count_b, bins_b = numpy.histogram(data_cent[:, 0:nw], bins)
-    axes[0, 1].hist(count_b, bins=bins_b, color="b")
+    axes[0, 1].hist(bins_b[:-1], bins_b, weights=count_b, color="b")
     axes[0, 1].set_xlabel("Counts")
     axes[0, 1].set_title("Blue")
 
@@ -77,7 +77,7 @@ def process_files(files: list[pathlib.Path], outpath: pathlib.Path):
     log.debug(f"Percentile {perc}% (b): {perc_b:.2f}.")
 
     count_r, bins_r = numpy.histogram(data_cent[:, nw : 2 * nw], bins)
-    axes[1, 0].hist(count_b, bins=bins_r, color="r")
+    axes[1, 0].hist(bins_r[:-1], bins_r, weights=count_r, color="r")
     axes[1, 0].set_xlabel("Counts")
     axes[1, 0].set_title("Red")
 
@@ -85,7 +85,7 @@ def process_files(files: list[pathlib.Path], outpath: pathlib.Path):
     log.debug(f"Percentile {perc}% (r): {perc_r:.2f}.")
 
     count_z, bins_z = numpy.histogram(data_cent[:, 2 * nw :], bins)
-    axes[1, 1].hist(count_z, bins=bins_z, color="m")
+    axes[1, 1].hist(bins_z[:-1], bins_z, weights=count_z, color="m")
     axes[1, 1].set_xlabel("Counts")
     axes[1, 1].set_title("IR")
 
@@ -154,8 +154,11 @@ class SpecPatternEventHandler(PatternMatchingEventHandler):
                             f"Ignoring image {path!s}."
                         )
                         return
+
                     time.sleep(1)
                     elapsed += 1
+                    continue
+
                 break
 
             process_files(files, self.outpath)
