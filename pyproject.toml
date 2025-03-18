@@ -37,6 +37,9 @@ dev = [
     "ruff>=0.0.286",
 ]
 
+[tool.uv]
+default-groups = "all"
+
 [tool.ruff]
 line-length = 88
 target-version = 'py312'
