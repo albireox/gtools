@@ -139,7 +139,9 @@ def extract_and_stitch(
     -------
     extracted
         The extracted data, as a row-stacked array, ordered by fibre number and
-        with all brz cameras stitched together.
+        with all brz cameras stitched together. If cameras are missing in the
+        list of input files, the corresponding section of the array will be
+        filled with NaNs.
 
     """
 
@@ -148,10 +150,10 @@ def extract_and_stitch(
         basename = os.path.basename(files_)
         files_ = list(pathlib.Path(dirname).glob(basename))
 
-    if len(files_) != 9:
-        raise ValueError("Invalid number of files passed.")
-
     files_ = [pathlib.Path(file_) for file_ in files_]
+
+    nf: int = 648
+    nw: int = 4086
 
     with multiprocessing.Pool(processes=3) as pool:
         results = pool.map(partial(_extract_one, detrend=detrend, mode=mode), files_)
@@ -167,10 +169,12 @@ def extract_and_stitch(
         fw_cam: npt.NDArray[numpy.float32] | None = None
         for cam in ["b", "r", "z"]:
             cam_key = f"{cam}{spec}"
-            if cam_key not in extracted:
-                raise ValueError(f"Missing data for {cam_key}")
 
-            cam_data = extracted[cam_key]
+            if cam_key not in extracted:
+                cam_data = numpy.full((nf, nw), numpy.nan, dtype=numpy.float32)
+            else:
+                cam_data = extracted[cam_key]
+
             if fw_cam is None:
                 fw_cam = cam_data
             else:
