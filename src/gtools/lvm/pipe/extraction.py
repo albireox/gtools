@@ -20,32 +20,38 @@ import numpy.typing as npt
 import polars
 from astropy.io import fits
 
-from .detrend import apply_overscan
+from gtools.lvm.pipe import log
+from gtools.lvm.pipe.detrend import apply_bias, apply_overscan, apply_pixelmask
 
 
-__all__ = ["quick_extraction", "extract_and_stitch"]
+__all__ = ["quick_extraction", "gaussian_extract", "gaussian", "extract_and_stitch"]
 
 
 DATA = pathlib.Path(__file__).parent / "data"
 
+RAW_SHAPE: tuple[int, int] = (4080, 4120)
+OVERSCAN_SHAPE: tuple[int, int] = (4080, 4086)
+
 
 def quick_extraction(
-    file_: pathlib.Path | str,
-    detrend: bool = False,
-    mode: Literal["sum", "mean", "cent"] = "sum",
+    data: npt.NDArray[numpy.float32],
+    camera: str,
+    func: Literal["sum", "cent"] = "sum",
 ):
     """Runs a quick extraction using pre-computed traces.
 
     Parameters
     ----------
-    file_
-        The path to the raw file to extract.
-    detrend
-        Whether to apply detrending before extraction.
-    mode
-        The extraction mode. Can be ``'sum'`` (sums the flux in the trace),
-        ``'mean'`` (returns the mean flux in the trace), or ``'cent'`` (returns
-        the flux at the centre of the trace).
+    data
+        The data array from which to extract the data. Must be a 2D,
+        overscan-corrected array, optionally with the bias and pixelmask
+        corrections applied.
+    camera
+        The camera with which the data was taken (``b1``, ``b2``, ...)
+    func
+        The extraction function. Can be ``'sum'`` (sums the flux in the trace)
+        or ``'cent'`` (returns the flux at the centre of the trace). In this
+        quick extraction mode all pixels in the trace are fully included.
 
     Returns
     -------
@@ -54,23 +60,14 @@ def quick_extraction(
 
     """
 
-    # Load data and header.
-    raw: npt.NDArray[numpy.uint16] = fits.getdata(file_, ext=0)
-    header = fits.getheader(file_, ext=0)
-
-    # Apply detrending if requested.
-    if detrend:
-        data = apply_overscan(raw, header)
-    else:
-        data = raw.astype(numpy.float32)
+    data = data.astype(numpy.float32)
 
     # Load the traces.
     cent_trace = polars.read_parquet(DATA / "cent_trace.parquet")
     width_trace = polars.read_parquet(DATA / "width_trace.parquet")
 
-    ccd = header["CCD"]
-    cent_trace = cent_trace.filter(polars.col.ccd == ccd)
-    width_trace = width_trace.filter(polars.col.ccd == ccd)
+    cent_trace = cent_trace.filter(polars.col.ccd == camera)
+    width_trace = width_trace.filter(polars.col.ccd == camera)
 
     xrange = numpy.arange(data.shape[1])
     extracted: npt.NDArray[numpy.float32] = numpy.empty(
@@ -93,34 +90,156 @@ def quick_extraction(
         y0 = numpy.floor(ycent - ywidth / 2).astype(int)
         y1 = numpy.ceil(ycent + ywidth / 2).astype(int)
 
-        if mode == "cent":
+        if func == "cent":
             fibre_data = [data[int(ycent[xx]), xx] for xx in xrange]
-        elif mode == "sum":
-            fibre_data = [data[y0[xx] : y1[xx] + 1, xx].sum() for xx in xrange]
-        elif mode == "mean":
-            fibre_data = [data[y0[xx] : y1[xx] + 1, xx].mean() for xx in xrange]
+        elif func == "sum":
+            fibre_data = [numpy.nansum(data[y0[xx] : y1[xx] + 1, xx]) for xx in xrange]
+        else:
+            raise ValueError("Invalid func {func!r}.")
 
         extracted[nfibre - 1, :] = numpy.array(fibre_data)
 
     return extracted
 
 
+def gaussian(x: float, mu: float, sig: float) -> float:
+    """Evaluates a Gaussian with mean ``mu`` and standard deviation ``sig`` at ``x``."""
+
+    return numpy.exp(-numpy.power(x - mu, 2) / (2 * numpy.power(sig, 2)))
+
+
+def gaussian_extract(
+    data: npt.NDArray[numpy.float32],
+    camera: str,
+    func: Literal["sum", "cent"] = "sum",
+    threshold: float = 0.01,
+):
+    """Extraction using pre-computed traces using a Gaussian profile.
+
+    For each wavelength element, the flux for a given fibre is extracted integrating
+    over a Gaussian profile centred at the trace position and with a sigma equal to
+    the width of the trace at that wavelength.
+
+    Parameters
+    ----------
+    data
+        The data array from which to extract the data. Must be a 2D,
+        overscan-corrected array, optionally with the bias and pixelmask
+        corrections applied.
+    camera
+        The camera with which the data was taken (``b1``, ``b2``, ...)
+    func
+        The extraction function to use. Can be ``'sum'`` (sums the flux in the trace)
+        or ``'cent'`` (returns the flux at the centre of the trace).
+    threshold
+        The threshold below which the Gaussian profile is set to zero.
+
+    Returns
+    -------
+    data
+        The extracted data, as a row-stacked array.
+
+    """
+
+    data = data.astype(numpy.float32)
+
+    # Load the traces.
+    cent_trace = polars.read_parquet(DATA / "cent_trace.parquet")
+    width_trace = polars.read_parquet(DATA / "width_trace.parquet")
+
+    cent_trace = cent_trace.filter(polars.col.ccd == camera)
+    width_trace = width_trace.filter(polars.col.ccd == camera)
+
+    xrange = numpy.arange(data.shape[1])
+    extracted: npt.NDArray[numpy.float32] = numpy.empty(
+        (len(cent_trace), len(xrange)),
+        dtype=numpy.float32,
+    )
+
+    for row in cent_trace.rows(named=True):
+        nfibre = row["nfibre"]
+
+        cent_ncoeffs = len([col for col in row if col.startswith("coeff")])
+        cent_coeffs = [row[f"coeff{i}"] for i in range(cent_ncoeffs)]
+        fcent = numpy.polyval(cent_coeffs[::-1], xrange)
+
+        if func == "cent":
+            fibre_data = numpy.array(
+                [data[int(fcent[xx]), xx] for xx in xrange],
+                dtype=numpy.float32,
+            )
+        elif func == "sum":
+            # We'll handle that in a moment.
+            pass
+        else:
+            raise ValueError(f"Invalid mode {func!r}.")
+
+        width_row = width_trace.filter(polars.col.nfibre == nfibre).to_dicts()[0]
+        width_ncoeffs = len([col for col in width_row if col.startswith("coeff")])
+        width_coeffs = [width_row[f"coeff{i}"] for i in range(width_ncoeffs)]
+        fwidth = numpy.polyval(width_coeffs[::-1], xrange)
+
+        fibre_data = numpy.zeros(len(xrange), dtype=numpy.float32)
+        for xx in xrange:
+            gauss_profile = numpy.array(
+                [gaussian(yy, fcent[xx], fwidth[xx]) for yy in range(data.shape[0])],
+                dtype=numpy.float32,
+            )
+            gauss_profile[gauss_profile < threshold] = 0
+            fibre_data[xx] = numpy.nansum(data[:, xx] * gauss_profile)
+
+        extracted[nfibre - 1, :] = fibre_data
+
+    return extracted
+
+
 def _extract_one(
     file_: pathlib.Path,
-    detrend: bool = True,
-    mode: Literal["sum", "mean", "cent"] = "sum",
+    calibs_directory: str | pathlib.Path | None = None,
+    apply_calibrations: bool = True,
+    extraction_mode: Literal["quick", "gaussian"] = "quick",
+    extraction_func: Literal["sum", "cent"] = "sum",
 ):
     """Extracts the data from a single file."""
 
     ccd = fits.getheader(file_, ext=0)["CCD"]
 
-    return {ccd: quick_extraction(file_, detrend=detrend, mode=mode)}
+    data = fits.getdata(file_, ext=0)
+    assert isinstance(data, numpy.ndarray)
+
+    if data.shape == RAW_SHAPE:
+        log.debug(f"{file_!s}: applying overscan correction.")
+        data = apply_overscan(file_, extension=0)
+
+    calibs_directory = pathlib.Path(calibs_directory) if calibs_directory else None
+
+    if calibs_directory and apply_calibrations:
+        bias_file = calibs_directory / f"lvm-mbias-{ccd}.fits"
+        pixelmask_file = calibs_directory / "pixelmasks" / f"lvm-mpixmask-{ccd}.fits"
+
+        if bias_file.exists():
+            data = apply_bias(data, bias_file)
+        else:
+            log.warning(f"{file_!s}: cannot find bias file {bias_file!s}")
+
+        if pixelmask_file.exists():
+            data = apply_pixelmask(data, pixelmask_file)
+        else:
+            log.warning(f"{file_!s}: cannot find pixelmask file {pixelmask_file!s}")
+
+    if extraction_mode == "quick":
+        return {ccd: quick_extraction(data, ccd, func=extraction_func)}
+    elif extraction_mode == "gaussian":
+        return {ccd: gaussian_extract(data, ccd, func=extraction_func)}
 
 
 def extract_and_stitch(
     files_: Sequence[str | pathlib.Path] | str,
-    detrend: bool = True,
-    mode: Literal["sum", "mean", "cent"] = "sum",
+    calibs_directory: str | pathlib.Path | None = None,
+    apply_calibrations: bool = True,
+    extraction_mode: Literal["quick", "gaussian"] = "quick",
+    extraction_func: Literal["sum", "cent"] = "sum",
+    n_cpus: int = 4,
 ):
     """Extracts fibre data and returns a single array.
 
@@ -129,11 +248,27 @@ def extract_and_stitch(
     files_
         The list of files to extract, which must belong to the same exposure for
         all the different cameras. If a string is passed, it will be used as a
-        glob pattern to find the files.
-    detrend
-        Whether to apply detrending before extraction.
-    mode
-        The extraction mode. See :obj:`.quick_extraction`.
+        glob pattern to find the files. If the format of the file data is not
+        compatible with an overscan-corrected array, the `.apply_overscan` function
+        will be called with the file.
+    calibs_directory
+        The directory containing the calibration files. If not provided no
+        calibrations other than the overscan correction will be applied.
+    apply_calibrations
+        Applies the pixelmask and bias corrections. Set to ``False`` if the
+        input data is already corrected. An overscan calibration is always applied
+        if the data does not match the expected shape. If
+        the ``lvm-mfiberflat_twilight-*.fits`` files are found in ``calibs_directory``,
+        a relative flux correction is applied to the extracted spectra.
+        This argument is ignored if ``calibs_directory`` is not provided.
+    extraction_mode
+        The extraction mode to use. Can be ``'quick'`` or ``'gaussian'``.
+    extraction_func
+        The function to use to evaluate the extracted data. See
+        :obj:`.quick_extraction`.
+    n_cpus
+        Number of CPUs to use to extract the data using multiprocessing. Set to zero
+        to disable multiprocessing.
 
     Returns
     -------
@@ -155,8 +290,19 @@ def extract_and_stitch(
     nf: int = 648
     nw: int = 4086
 
-    with multiprocessing.Pool(processes=3) as pool:
-        results = pool.map(partial(_extract_one, detrend=detrend, mode=mode), files_)
+    extract_partial = partial(
+        _extract_one,
+        calibs_directory=calibs_directory,
+        apply_calibrations=apply_calibrations,
+        extraction_mode=extraction_mode,
+        extraction_func=extraction_func,
+    )
+
+    if n_cpus == 0 or n_cpus is False or n_cpus is None:
+        results = map(extract_partial, files_)
+    else:
+        with multiprocessing.Pool(processes=n_cpus) as pool:
+            results = pool.map(extract_partial, files_)
 
     extracted: dict[str, npt.NDArray[numpy.float32]] = {}
     for result in results:

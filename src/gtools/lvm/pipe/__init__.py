@@ -8,6 +8,12 @@
 
 from __future__ import annotations
 
+from sdsstools.logger import get_logger
+
+
+log = get_logger("gtools.lvm.pipe", use_rich_handler=True)
+
+
 from .detrend import *
 from .extraction import *
 from .plotting import *
