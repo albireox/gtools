@@ -17,7 +17,7 @@ from astropy.io import fits
 from . import defaults, tools
 
 
-__all__ = ["apply_overscan"]
+__all__ = ["apply_overscan", "apply_pixelmask", "apply_bias"]
 
 
 def apply_overscan(
@@ -83,3 +83,83 @@ def apply_overscan(
     stitched[: quads[0].shape[0], quads[0].shape[1] :] = quads[3]
 
     return stitched
+
+
+def apply_pixelmask(
+    data: str | pathlib.Path | npt.NDArray[numpy.float32],
+    pixelmask: str | pathlib.Path | npt.NDArray[numpy.bool],
+) -> npt.NDArray[numpy.float32]:
+    """Applies a pixel mask to a data array.
+
+    Parameters
+    ----------
+    data
+        The data array or the path to a FITS file. In either case, the data must
+        have been overscan corrected and trimmed to the usual ``4080x4086``
+        dimensions.
+    pixelmask
+        The pixel mask to apply or path to a FITS file. In the latter case, the
+        ``BADPIX`` extension is used.
+
+    Returns
+    -------
+    masked_data
+        The data array with the pixel mask applied.
+
+    """
+
+    if isinstance(data, (str, pathlib.Path)):
+        data = fits.getdata(data, ext=0)
+
+    if isinstance(pixelmask, (str, pathlib.Path)):
+        pixelmask = fits.open(pixelmask)["BADPIX"].data
+
+    assert isinstance(data, numpy.ndarray)
+    assert isinstance(pixelmask, numpy.ndarray)
+
+    pixelmask = pixelmask.astype(numpy.bool)
+
+    assert data.shape == pixelmask.shape
+
+    data[pixelmask] = numpy.nan
+
+    return data
+
+
+def apply_bias(
+    data: str | pathlib.Path | npt.NDArray[numpy.float32],
+    bias: str | pathlib.Path | npt.NDArray[numpy.float32],
+) -> npt.NDArray[numpy.float32]:
+    """Applies a pixel mask to a data array.
+
+    Parameters
+    ----------
+    data
+        The data array or the path to a FITS file. In either case, the data must
+        have been overscan corrected and trimmed to the usual ``4080x4086``
+        dimensions.
+    bias
+        The bias levels to apply or path to a FITS file. In the latter case, the
+        first extension is used. The bias array must have been overscan corrected.
+
+    Returns
+    -------
+    bias_data
+        The data array with the bias levels have been corrected.
+
+    """
+
+    if isinstance(data, (str, pathlib.Path)):
+        data = fits.getdata(data, ext=0)
+
+    if isinstance(bias, (str, pathlib.Path)):
+        bias = fits.open(bias)["BADPIX"].data
+
+    assert isinstance(data, numpy.ndarray)
+    assert isinstance(bias, numpy.ndarray)
+
+    assert data.shape == bias.shape
+
+    data -= bias
+
+    return data
