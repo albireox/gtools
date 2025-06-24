@@ -24,7 +24,7 @@ from gtools.lvm.pipe import log
 from gtools.lvm.pipe.detrend import apply_bias, apply_overscan, apply_pixelmask
 
 
-__all__ = ["quick_extraction", "gaussian_extract", "gaussian", "extract_and_stitch"]
+__all__ = ["quick_extraction", "gaussian_extract", "extract_and_stitch"]
 
 
 DATA = pathlib.Path(__file__).parent / "data"
@@ -37,6 +37,7 @@ def quick_extraction(
     data: npt.NDArray[numpy.float32],
     camera: str,
     func: Literal["sum", "cent"] = "sum",
+    subpixel: bool = True,
 ):
     """Runs a quick extraction using pre-computed traces.
 
@@ -52,6 +53,9 @@ def quick_extraction(
         The extraction function. Can be ``'sum'`` (sums the flux in the trace)
         or ``'cent'`` (returns the flux at the centre of the trace). In this
         quick extraction mode all pixels in the trace are fully included.
+    subpixel
+        If ``True``, the extraction will take into account the subpixel nature of
+        the traces width.
 
     Returns
     -------
@@ -90,22 +94,26 @@ def quick_extraction(
         y0 = numpy.floor(ycent - ywidth / 2).astype(int)
         y1 = numpy.ceil(ycent + ywidth / 2).astype(int)
 
+        fibre_data: npt.NDArray[numpy.float32]
         if func == "cent":
-            fibre_data = [data[int(ycent[xx]), xx] for xx in xrange]
+            fibre_data = numpy.array([data[int(ycent[xx]), xx] for xx in xrange])
         elif func == "sum":
-            fibre_data = [numpy.nansum(data[y0[xx] : y1[xx] + 1, xx]) for xx in xrange]
+            fibre_data = numpy.zeros(len(xrange), dtype=numpy.float32)
+            for xx in xrange:
+                fextr = data[y0[xx] : y1[xx] + 1, xx]
+
+                if subpixel:
+                    # Take into account the fraction of the first and last pixel.
+                    frac = (ywidth[xx] - int(ywidth[xx])) / 2
+                    fextr[0] *= frac
+                    fextr[-1] *= frac
+                    fibre_data[xx] = numpy.nansum(fextr)
         else:
             raise ValueError("Invalid func {func!r}.")
 
-        extracted[nfibre - 1, :] = numpy.array(fibre_data)
+        extracted[nfibre - 1, :] = fibre_data.astype(numpy.float32)
 
     return extracted
-
-
-def gaussian(x: float, mu: float, sig: float) -> float:
-    """Evaluates a Gaussian with mean ``mu`` and standard deviation ``sig`` at ``x``."""
-
-    return numpy.exp(-numpy.power(x - mu, 2) / (2 * numpy.power(sig, 2)))
 
 
 def gaussian_extract(
@@ -143,6 +151,9 @@ def gaussian_extract(
 
     data = data.astype(numpy.float32)
 
+    if func not in ["sum", "cent"]:
+        raise ValueError(f"Invalid func {func!r}.")
+
     # Load the traces.
     cent_trace = polars.read_parquet(DATA / "cent_trace.parquet")
     width_trace = polars.read_parquet(DATA / "width_trace.parquet")
@@ -151,28 +162,19 @@ def gaussian_extract(
     width_trace = width_trace.filter(polars.col.ccd == camera)
 
     xrange = numpy.arange(data.shape[1])
+    yrange = numpy.arange(data.shape[0])
+
     extracted: npt.NDArray[numpy.float32] = numpy.empty(
         (len(cent_trace), len(xrange)),
         dtype=numpy.float32,
     )
 
-    for row in cent_trace.rows(named=True):
+    for ii, row in enumerate(cent_trace.rows(named=True)):
         nfibre = row["nfibre"]
 
         cent_ncoeffs = len([col for col in row if col.startswith("coeff")])
         cent_coeffs = [row[f"coeff{i}"] for i in range(cent_ncoeffs)]
         fcent = numpy.polyval(cent_coeffs[::-1], xrange)
-
-        if func == "cent":
-            fibre_data = numpy.array(
-                [data[int(fcent[xx]), xx] for xx in xrange],
-                dtype=numpy.float32,
-            )
-        elif func == "sum":
-            # We'll handle that in a moment.
-            pass
-        else:
-            raise ValueError(f"Invalid mode {func!r}.")
 
         width_row = width_trace.filter(polars.col.nfibre == nfibre).to_dicts()[0]
         width_ncoeffs = len([col for col in width_row if col.startswith("coeff")])
@@ -180,13 +182,19 @@ def gaussian_extract(
         fwidth = numpy.polyval(width_coeffs[::-1], xrange)
 
         fibre_data = numpy.zeros(len(xrange), dtype=numpy.float32)
+
         for xx in xrange:
-            gauss_profile = numpy.array(
-                [gaussian(yy, fcent[xx], fwidth[xx]) for yy in range(data.shape[0])],
-                dtype=numpy.float32,
-            )
-            gauss_profile[gauss_profile < threshold] = 0
-            fibre_data[xx] = numpy.nansum(data[:, xx] * gauss_profile)
+            aa = numpy.interp(fcent[xx], yrange, data[:, xx])
+
+            if func == "cent":
+                fibre_data[xx] = aa
+                continue
+
+            # The area below a Gaussian is a*sqrt(2*pi)*sigma, so we select the
+            # value of a to match the value of the central pixel. We interpolate
+            # the value of the central pixel.
+            egauss = aa * numpy.abs(fwidth[xx]) * numpy.sqrt(2 * numpy.pi)
+            fibre_data[xx] = egauss
 
         extracted[nfibre - 1, :] = fibre_data
 

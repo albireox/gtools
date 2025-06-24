@@ -67,9 +67,9 @@ def plot_ifu_data(
     assert data.shape[0] == len(fibermap), "Data shape does not match fibermap length."
 
     if wrange is not None:
-        data = data[:, wrange[0] : wrange[1]].sum(axis=1)
-    else:
-        data = data.sum(axis=1)
+        data = data[:, wrange[0] : wrange[1]]
+
+    data = numpy.nansum(data, axis=1)
 
     interval_obj: Any
     if interval == "zscale":
@@ -106,7 +106,7 @@ def plot_ifu_data(
         ax.scatter(
             xpmm,
             ypmm,
-            s=320,
+            s=400,
             marker=(6, 0, 90),  # hexagon rotated 90 degrees   # type: ignore
             c=data[ifib],
             edgecolors="None",
@@ -118,6 +118,9 @@ def plot_ifu_data(
 
     ax.set_xlabel("x [mm]")
     ax.set_ylabel("y [mm]")
+
+    ax.set_xlim(-8, 8)
+    ax.set_ylim(-8, 8)
 
     fig.tight_layout()
 
